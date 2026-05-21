@@ -96,14 +96,16 @@ have not run the first index yet.
 ## 3. Working with an existing project
 
 Existing projects are already in `src/main/backend/rag-projects.json` and
-their schemas already exist in `claude_rag`. Re-scans are **manual** by
-default — drive them with `./bld scan <project|all>` (see §7 below) or
-from a script via the JSON-RPC `reindex` method. To use a project from
-Claude Code, jump to **§5 Register with Claude Code**.
+their schemas already exist in `claude_rag`. The cron sweep refreshes
+them every 10 minutes — incremental sweeps are cheap (SHA check per
+file, no work when nothing has changed). You can also force a refresh
+on demand with `./bld scan <project|all>` (see §7) or via the JSON-RPC
+`reindex` method. To use a project from Claude Code, jump to **§5
+Register with Claude Code**.
 
-> *Cron auto-sweep is shipped commented out.* If you want the original
-> "background sweep every 10 minutes" behavior, uncomment the line in
-> `src/main/backend/CronTasks/crontab`. Either way, the system
+> The cron sweep is configured in `src/main/backend/CronTasks/crontab`.
+> Comment out the `*/10 * * * * RAGSweep` line if you'd rather run
+> sweeps only when you explicitly ask. Either way, the system
 > auto-scans any project whose `rag_file` table is empty at server
 > startup (e.g. a brand-new project you just added) — see §7.4.
 

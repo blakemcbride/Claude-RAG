@@ -157,9 +157,9 @@ if you need to:
 - `OllamaURL` if Ollama is not on `127.0.0.1:11434`.
 - `EmbeddingModel` if you want a different Ollama model (must match
   `EmbeddingDim`; the schema and stored embeddings are dimension-locked).
-- `RAGSweepMinutes` if you enable the cron sweep (off by default — see
-  `CronTasks/crontab`) and want it to fire on a different interval than
-  10 minutes.
+- `RAGSweepMinutes` to change the cron sweep interval from its default
+  (10 minutes). The cron sweep is enabled in `CronTasks/crontab`; comment
+  out the `RAGSweep` line there if you'd rather drive scans manually.
 - `HNSWEfSearch` if you have a much larger index than ~100k chunks and
   recall starts to slip (default 400 is fine up to that size).
 
@@ -238,11 +238,13 @@ echo "indexing done"
 Throughput is ~5–15 files/sec with a GPU on the Ollama side; ~10–25
 minutes for a 10k-file codebase, slower on CPU.
 
-After this first run, **the index does not refresh itself**. The cron
-auto-sweep is shipped commented out in
-`src/main/backend/CronTasks/crontab`. Rescan manually with `./bld scan
-<project|all>`, or uncomment that crontab line if you'd rather have a
-sweep every 10 minutes.
+After this first run, the index refreshes itself every 10 minutes via
+the cron sweep configured in `src/main/backend/CronTasks/crontab`. The
+sweep is incremental — it hashes each file and only re-embeds the ones
+whose content has changed — so a no-op sweep over a large repo takes
+just a few seconds. If you want to force an immediate refresh, use
+`./bld scan <project|all>`; to disable the cron sweep entirely, comment
+out the `*/10 * * * * RAGSweep` line in that crontab.
 
 ---
 

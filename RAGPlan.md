@@ -253,7 +253,7 @@ lock row in `rag_meta`:
 | Trigger | Code | When |
 |---|---|---|
 | Startup auto-scan (per project) | `KissInit.init2` → `ProjectBootstrap.ensureAll` | Once per project whose `rag_file` is empty at server start (i.e. new project or wiped index) |
-| Cron sweep | `CronTasks/RAGSweep.groovy`, controlled by `CronTasks/crontab` | Off by default — uncomment the `*/10 * * * * RAGSweep` line to enable |
+| Cron sweep | `CronTasks/RAGSweep.groovy`, controlled by `CronTasks/crontab` | Every 10 minutes (`*/10 * * * * RAGSweep`); comment out to disable |
 | `./bld scan <project\|all>` | `Tasks.scan` → POSTs `RAGAdmin.reindex` and polls `RAGAdmin.status` | Foreground, with per-second progress to the terminal |
 | JSON-RPC `RAGAdmin.reindex` (fire and forget) | `services/RAGAdmin.reindex` | When called by curl, scripts, or `bld scan` itself |
 
@@ -362,15 +362,16 @@ has `name`, `roots` (absolute paths), and optional `excludeGlobs`. The
 example file in the repo declares one placeholder `"demo"` project so
 the schema rule is obvious.
 
-### `CronTasks/crontab` — sweep schedule (off by default)
+### `CronTasks/crontab` — sweep schedule
 
-Standard crontab format. Ships with `*/10 * * * * RAGSweep` **commented
-out**: re-scans are manual by default (`./bld scan <project|all>` or the
-JSON-RPC `reindex` endpoint). To restore the original Kiss-style
-background sweep, uncomment the line. The cron task then iterates every
-configured project sequentially, acquiring the per-project lock around
-each one; a manual reindex running for one project skips that project
-on this firing without blocking the others.
+Standard crontab format. Ships with `*/10 * * * * RAGSweep` enabled.
+The cron task iterates every configured project sequentially,
+acquiring the per-project lock around each one; a manual reindex
+running for one project skips that project on this firing without
+blocking the others. Incremental sweeps are cheap (SHA-only reads
+when nothing has changed), so the every-10-minutes cadence is light
+on the host. Comment the line out to disable; on-demand scans still
+work via `./bld scan` or the JSON-RPC `reindex` endpoint.
 
 ## 8. Concurrency
 

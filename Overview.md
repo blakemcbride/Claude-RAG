@@ -50,10 +50,10 @@ already using. Nothing leaves the host.
 ```
 
 **Write path** (indexer):
-1. A manual reindex (`./bld scan <project|all>`, the JSON-RPC `reindex`
-   endpoint, or the startup auto-scan for never-scanned projects) walks
-   the configured roots. An optional cron-driven sweep is available
-   (commented out by default in `CronTasks/crontab`).
+1. A sweep walks the configured roots. Triggers: the cron task fires
+   every 10 minutes by default; the startup auto-scan covers
+   never-scanned projects; `./bld scan <project|all>` and the JSON-RPC
+   `reindex` endpoint cover manual on-demand runs.
 2. Files are classified by extension / filename (50+ languages
    recognized), and either symbol-aware chunked (Java, Groovy, JS/TS,
    Kotlin, Scala, C#, Swift, Dart, C/C++/Obj-C, Python, Ruby, PHP, Rust,
