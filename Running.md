@@ -96,9 +96,16 @@ have not run the first index yet.
 ## 3. Working with an existing project
 
 Existing projects are already in `src/main/backend/rag-projects.json` and
-their schemas already exist in `claude_rag`. The cron sweeps them every
-10 minutes — file changes flow in automatically. To use one from Claude
-Code, jump to **§5 Register with Claude Code**.
+their schemas already exist in `claude_rag`. Re-scans are **manual** by
+default — drive them with `./bld scan <project|all>` (see §7 below) or
+from a script via the JSON-RPC `reindex` method. To use a project from
+Claude Code, jump to **§5 Register with Claude Code**.
+
+> *Cron auto-sweep is shipped commented out.* If you want the original
+> "background sweep every 10 minutes" behavior, uncomment the line in
+> `src/main/backend/CronTasks/crontab`. Either way, the system
+> auto-scans any project whose `rag_file` table is empty at server
+> startup (e.g. a brand-new project you just added) — see §7.4.
 
 ---
 
@@ -181,7 +188,7 @@ Grab your secret from `application.ini` and pass it as a header:
 ```bash
 SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
 
-claude mcp add --transport http rag-myproj \
+claude mcp add --transport http myproj \
     http://127.0.0.1:17080/rag-mcp/myproj \
     --header "X-RAG-Token: $SECRET"
 ```
@@ -195,7 +202,7 @@ After registration:
 2. Only enable the matching MCP server for that session. Different sessions
    pointed at different projects will not see each other's index.
 3. Try a prompt that invokes the tool:
-   *"Use mcp__rag-myproj__search_code to find where login is handled."*
+   *"Use mcp__myproj__search_code to find where login is handled."*
    Claude will call `search_code`, then `Read` the absolute_path from a top hit.
 
 ---
@@ -224,8 +231,34 @@ curl -s -X POST http://localhost:17080/rest \
 
 ### Trigger a manual reindex
 
+The easiest way is the bld target — it polls the server and prints
+per-project progress in your terminal:
+
 ```bash
-# Incremental (changed/new files only — fast):
+./bld scan myproj      # one project, incremental
+./bld scan all         # every project in rag-projects.json, sequentially
+```
+
+Sample output:
+
+```
+Scanning stack360...
+  [2s      ]  files=143      chunks=1450
+  [12s     ]  files=1240     chunks=14500
+  ...
+  [18m 32s ]  DONE: files=10815   chunks=106674
+```
+
+If a sweep is already running for that project the second caller is
+rejected by the per-project lock and reports `rejected: A reindex is
+already in progress...`.
+
+You can also drive `RAGAdmin.reindex` directly over JSON-RPC if you need
+a full rebuild (TRUNCATE + re-embed) or you want fire-and-forget
+behavior:
+
+```bash
+# Incremental — same effect as './bld scan myproj' but async (returns immediately):
 curl -s -X POST http://localhost:17080/rest \
     -H 'Content-Type: application/json' \
     -d '{"_method":"reindex","_class":"services/RAGAdmin","project":"myproj","full":false}'
@@ -236,9 +269,19 @@ curl -s -X POST http://localhost:17080/rest \
     -d '{"_method":"reindex","_class":"services/RAGAdmin","project":"myproj","full":true}'
 ```
 
-If a reindex is already running for that project the response will be
-`{"started": false, "message": "A reindex is already in progress..."}` —
-that is the per-project lock doing its job.
+### Auto-scan on startup
+
+Whenever Kiss starts (`./bld start`), `KissInit.init2` runs the
+multi-project bootstrap; for any configured project whose `rag_file`
+table is empty (i.e. never scanned, or wiped), a daemon thread runs the
+indexer on it right then. Steady-state restarts are no-ops because every
+project already has rows. Useful in two scenarios:
+
+- You add a new project to `rag-projects.json` and restart.
+- You wipe an index (`./bld realclean` or a manual `TRUNCATE`) and restart.
+
+Look for `auto-scan starting` and `auto-scan finished` lines in
+`tomcat/logs/catalina.out`.
 
 ### Watch the server log
 
@@ -284,7 +327,7 @@ fully remove:
 psql -U postgres -d claude_rag -c "DROP SCHEMA myproj CASCADE;"
 
 # 3. Remove the MCP entry from Claude Code:
-claude mcp remove rag-myproj
+claude mcp remove myproj
 ```
 
 ---

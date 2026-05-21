@@ -23,13 +23,28 @@ class ProjectBootstrap {
     private static final Logger logger = LogManager.getLogger(ProjectBootstrap.class)
     private static final int EMBEDDING_DIM = 768
 
-    static void ensureAll(Connection db) {
+    /**
+     * Ensure each configured project's schema + tables exist, reset stale
+     * reindex_running flags, and report which projects appear to have
+     * never been scanned (empty rag_file table). The returned list is what
+     * KissInit.init2 uses to kick off an auto-scan at startup for any
+     * fresh project.
+     */
+    static List<String> ensureAll(Connection db) {
+        List<String> needsScan = []
         for (ProjectRegistry.Project p : ProjectRegistry.load()) {
             ensureSchema(db, p.name)
             // Recovery: a previous crash may have left the lock set.
             db.execute("UPDATE ${p.name}.rag_meta SET value = 'false' WHERE key = 'reindex_running'".toString())
+            // "Never scanned" — empty rag_file table. True both for a
+            // freshly-created schema and for one whose data was wiped.
+            org.kissweb.database.Record row = db.fetchOne("SELECT count(*) AS n FROM ${p.name}.rag_file".toString())
+            long fileCount = (row != null) ? row.getLong("n") : 0L
+            if (fileCount == 0L)
+                needsScan.add(p.name)
         }
         db.commit()
+        return needsScan
     }
 
     private static void ensureSchema(Connection db, String project) {

@@ -157,7 +157,9 @@ if you need to:
 - `OllamaURL` if Ollama is not on `127.0.0.1:11434`.
 - `EmbeddingModel` if you want a different Ollama model (must match
   `EmbeddingDim`; the schema and stored embeddings are dimension-locked).
-- `RAGSweepMinutes` to change the cron interval (default 10 minutes).
+- `RAGSweepMinutes` if you enable the cron sweep (off by default — see
+  `CronTasks/crontab`) and want it to fire on a different interval than
+  10 minutes.
 - `HNSWEfSearch` if you have a much larger index than ~100k chunks and
   recall starts to slip (default 400 is fine up to that size).
 
@@ -202,24 +204,25 @@ Expected: one row per project listed in `rag-projects.json`.
 
 ---
 
-## 8. Trigger the first full index
+## 8. The first index
 
-For each project name in `rag-projects.json`:
+You usually have **nothing to do here**. When Kiss started in step 7 it
+detected that each project's `rag_file` table was empty and kicked off
+the first index automatically in a background thread. The indexer keeps
+running after `./bld start` returns; you can watch it with:
 
 ```bash
-curl -s -X POST http://localhost:17080/rest \
-    -H 'Content-Type: application/json' \
-    -d '{"_method":"reindex","_class":"services/RAGAdmin","project":"myproj","full":true}' \
-  | python3 -m json.tool
+./bld scan myproj
 ```
 
-Expected:
+`scan` is idempotent: if a sweep is already in flight (typical right
+after a fresh start), it reports `rejected: A reindex is already in
+progress...` rather than starting another. If the sweep has already
+finished, it triggers a quick incremental re-scan that completes in
+seconds.
 
-```json
-{ "started": true, "project": "myproj", ... }
-```
-
-The work runs in a background thread. Watch progress with:
+If you'd rather watch directly from the database while the auto-scan
+runs:
 
 ```bash
 while [ "$(psql -U postgres -d claude_rag -tAc \
@@ -235,9 +238,11 @@ echo "indexing done"
 Throughput is ~5–15 files/sec with a GPU on the Ollama side; ~10–25
 minutes for a 10k-file codebase, slower on CPU.
 
-After the first full index, the cron (every 10 minutes by default) keeps
-the index current. You won't need to rerun this command unless you add a
-new project or want a clean rebuild.
+After this first run, **the index does not refresh itself**. The cron
+auto-sweep is shipped commented out in
+`src/main/backend/CronTasks/crontab`. Rescan manually with `./bld scan
+<project|all>`, or uncomment that crontab line if you'd rather have a
+sweep every 10 minutes.
 
 ---
 
@@ -248,7 +253,7 @@ Once per project:
 ```bash
 SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
 
-claude mcp add --transport http rag-myproj \
+claude mcp add --transport http myproj \
     http://127.0.0.1:17080/rag-mcp/myproj \
     --header "X-RAG-Token: $SECRET"
 ```
@@ -259,7 +264,7 @@ Verify:
 claude mcp list
 ```
 
-Expected: `rag-myproj` appears in the list.
+Expected: `myproj` appears in the list.
 
 If you ever rotate the secret in `application.ini`, restart the server
 and re-run `claude mcp add` (it will replace the existing entry).
@@ -271,13 +276,13 @@ and re-run `claude mcp add` (it will replace the existing entry).
 Start a Claude Code session inside the project's working tree. Enable the
 matching MCP server for that session, then try a prompt:
 
-> *Use `mcp__rag-myproj__search_code` to find where login is handled.*
+> *Use `mcp__myproj__search_code` to find where login is handled.*
 
 Claude will call `search_code`, get a list of hits with file paths and
 line ranges, then typically follow up with `Read` on the top hit's
 `absolute_path` and line range.
 
-If you don't see the `mcp__rag-myproj__*` tools, check:
+If you don't see the `mcp__myproj__*` tools, check:
 
 1. The server is running: `curl http://localhost:17080/rag-mcp/myproj -X POST -H "X-RAG-Token: $SECRET" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'` returns JSON.
 2. The registration is visible: `claude mcp list`.

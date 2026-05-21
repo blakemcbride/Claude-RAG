@@ -247,27 +247,44 @@ for "new file" and "changed file".
 
 ### 5.6 Reindex lifecycle
 
-Triggered from three places, all of which share the same per-project
+Triggered from four places, all of which share the same per-project
 lock row in `rag_meta`:
 
-| Trigger | Code |
-|---|---|
-| Cron, every `RAGSweepMinutes` (default 10) | `CronTasks/RAGSweep.groovy` |
-| Manual via JSON-RPC | `services/RAGAdmin.reindex` (admin endpoint at `/rest`) |
-| Backend hot-reload | `RAGIndexer.runSweep / runFullRebuild` static methods |
+| Trigger | Code | When |
+|---|---|---|
+| Startup auto-scan (per project) | `KissInit.init2` → `ProjectBootstrap.ensureAll` | Once per project whose `rag_file` is empty at server start (i.e. new project or wiped index) |
+| Cron sweep | `CronTasks/RAGSweep.groovy`, controlled by `CronTasks/crontab` | Off by default — uncomment the `*/10 * * * * RAGSweep` line to enable |
+| `./bld scan <project\|all>` | `Tasks.scan` → POSTs `RAGAdmin.reindex` and polls `RAGAdmin.status` | Foreground, with per-second progress to the terminal |
+| JSON-RPC `RAGAdmin.reindex` (fire and forget) | `services/RAGAdmin.reindex` | When called by curl, scripts, or `bld scan` itself |
 
-Manual reindex spawns a daemon `Thread`. It opens its **own** JDBC
-connection (not from c3p0's pool) — c3p0's default
-`unreturnedConnectionTimeout` of 60 s would otherwise forcibly close
-the indexer's long-held connection mid-run. The bg thread pattern also
-sidesteps Tomcat's 30-second async-context timeout for
-`AsyncContext.startAsync`, which Kiss doesn't extend.
+The startup auto-scan runs in a daemon thread spawned by
+`KissInit.init2` *after* `ProjectBootstrap.ensureAll` reports which
+projects came back with an empty `rag_file`. It iterates them
+sequentially (they'd contend on the shared Ollama GPU anyway), opening
+its own JDBC connection so it isn't subject to c3p0's
+`unreturnedConnectionTimeout`. Logged as `auto-scan starting[...]` /
+`auto-scan finished[...]` in `catalina.out`.
+
+Manual reindex (the third and fourth rows above) spawns its own daemon
+`Thread` for the same reasons. The bg-thread pattern also sidesteps
+Tomcat's 30-second `AsyncContext.startAsync` timeout, which Kiss does
+not extend.
 
 The lock is acquired with `UPDATE <project>.rag_meta SET value='true'
 WHERE key='reindex_running' AND value='false' RETURNING key` — atomic
 compare-and-set, no separate read-then-write race. `KissInit.init2`
 resets every project's `reindex_running` row to `'false'` at every
 startup so a crash mid-sweep does not permanently lock the project.
+
+The `bld scan` flow is synchronous from the user's point of view but
+still asynchronous server-side: bld POSTs `reindex` (which returns
+`started=true` immediately), then polls `RAGAdmin.status` every 2
+seconds, surfaces `fileCount` / `chunkCount` until `indexing=false`,
+and prints a `DONE` line with the final counts. The poll suppresses
+duplicate identical lines (with a 10-second heartbeat so quiet
+periods still show "I'm alive"). Ctrl+C on the bld side does not
+abort the server sweep; that's what the lock is for — a second `bld
+scan` while one is in flight just reports `rejected`.
 
 ### 5.7 Sweep stats
 
@@ -345,13 +362,15 @@ has `name`, `roots` (absolute paths), and optional `excludeGlobs`. The
 example file in the repo declares one placeholder `"demo"` project so
 the schema rule is obvious.
 
-### `CronTasks/crontab` — sweep schedule
+### `CronTasks/crontab` — sweep schedule (off by default)
 
-Standard crontab format. Default is `*/10 * * * * RAGSweep` — every 10
-minutes. The cron sweep iterates every configured project sequentially
-and acquires the per-project lock around each one; a manual reindex
-running for one project skips that project on this firing without
-blocking the others.
+Standard crontab format. Ships with `*/10 * * * * RAGSweep` **commented
+out**: re-scans are manual by default (`./bld scan <project|all>` or the
+JSON-RPC `reindex` endpoint). To restore the original Kiss-style
+background sweep, uncomment the line. The cron task then iterates every
+configured project sequentially, acquiring the per-project lock around
+each one; a manual reindex running for one project skips that project
+on this firing without blocking the others.
 
 ## 8. Concurrency
 

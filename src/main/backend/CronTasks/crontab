@@ -47,6 +47,9 @@
 #* * * * * EveryMinute
 
 # Local RAG indexer — incremental sweep every 10 minutes.
-# See RAGPlan.md and src/main/backend/scripts/RAGIndexer.groovy.
-*/10 * * * * RAGSweep
+# Disabled by default; trigger sweeps manually with './bld scan <project|all>'
+# or via the RAGAdmin.reindex JSON-RPC endpoint. Uncomment to re-enable the
+# automatic background sweep. See RAGPlan.md §5.6 and
+# src/main/backend/scripts/RAGIndexer.groovy.
+#*/10 * * * * RAGSweep
 

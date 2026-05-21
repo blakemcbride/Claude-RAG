@@ -78,13 +78,13 @@ curl -s -X POST http://localhost:17080/rest \
     -d '{"_method":"reindex","_class":"services/RAGAdmin","project":"myproj","full":true}'
 
 # 8. Register with Claude Code (one MCP server per project).
-claude mcp add --transport http rag-myproj \
+claude mcp add --transport http myproj \
     http://127.0.0.1:17080/rag-mcp/myproj \
     --header "X-RAG-Token: $SECRET"
 ```
 
 In any subsequent Claude Code session inside that project's working tree,
-ask something like *"use mcp__rag-myproj__search_code to find where the
+ask something like *"use mcp__myproj__search_code to find where the
 authentication flow happens"* — Claude will call the tool, then `Read` the
 top hit.
 

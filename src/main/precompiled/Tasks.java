@@ -79,7 +79,34 @@ public class Tasks {
      */
     public static void main(String[] args) throws Exception {
         args = consumePortOptions(args);
+        args = consumeScanArg(args);
         BuildUtils.build(args, Tasks.class, LIBS);
+    }
+
+    /** Argument captured by {@code scan <project|all>} on the command line. */
+    static String scanTarget = null;
+
+    /**
+     * Pull the positional argument immediately after the {@code scan}
+     * task name out of the argument list. Stores it in {@link #scanTarget}
+     * so the {@link #scan()} method can read it after BuildUtils dispatch.
+     * If {@code scan} is present without a following arg, leaves
+     * {@code scanTarget} null and lets {@link #scan()} print usage.
+     */
+    private static String[] consumeScanArg(String[] args) {
+        java.util.List<String> out = new java.util.ArrayList<>(args.length);
+        for (int i = 0; i < args.length; i++) {
+            if ("scan".equals(args[i])) {
+                out.add("scan");
+                if (i + 1 < args.length) {
+                    scanTarget = args[i + 1];
+                    i++;
+                }
+            } else {
+                out.add(args[i]);
+            }
+        }
+        return out.toArray(new String[0]);
     }
 
     /**
@@ -166,6 +193,7 @@ public class Tasks {
         println("start                    build and run backend in the background");
         println("stop                     stop the background backend");
         println("status                   report whether the system is running and its config");
+        println("scan <project|all>       trigger an incremental rescan of one project or all");
         println("build                    build the entire system but don't run it");
         println("war                      create deployable war file");
 
@@ -423,6 +451,143 @@ public class Tasks {
             runWait(true, "tomcat\\bin\\stopdebug.cmd");
         else
             runWait(true, "tomcat/bin/shutdown.sh");
+    }
+
+    /**
+     * Trigger an incremental rescan of one project (or all projects) by
+     * calling the running server's {@code RAGAdmin.reindex} JSON-RPC
+     * endpoint, then poll the status endpoint until the sweep is done,
+     * printing per-project progress (file and chunk counts) as it goes.
+     *
+     * <p>The server still owns the actual indexing — bld is a separate
+     * JVM and cannot invoke the Kiss-resident indexer directly. This
+     * method's job is to drive the work and surface progress to the
+     * person at the terminal.</p>
+     *
+     * <p>For multiple targets the projects are scanned sequentially
+     * (they would otherwise contend on the shared Ollama GPU anyway).
+     * Each project's row shows files / chunks indexed so far and total
+     * elapsed time; the final line says DONE with the completion
+     * timing.</p>
+     */
+    public static void scan() {
+        if (scanTarget == null || scanTarget.isEmpty()) {
+            System.err.println("Usage: ./bld scan <project|all>");
+            return;
+        }
+        String httpP = extractFromFile("tomcat/conf/server.xml",
+                "<Connector port=\"(\\d+)\" protocol=\"HTTP/1\\.1\"", httpPort);
+        int port = parseIntOr(httpP, 0);
+        if (!portListening("127.0.0.1", port)) {
+            System.err.println("Server is not running on port " + httpP + ". Start it with './bld start' first.");
+            return;
+        }
+
+        java.util.List<String> known = readProjectNames("src/main/backend/rag-projects.json");
+        java.util.List<String> targets;
+        if ("all".equalsIgnoreCase(scanTarget)) {
+            if (known.isEmpty()) {
+                System.err.println("No projects found in src/main/backend/rag-projects.json");
+                return;
+            }
+            targets = known;
+        } else {
+            if (!known.isEmpty() && !known.contains(scanTarget))
+                System.err.println("warning: '" + scanTarget + "' is not in rag-projects.json (known: " + known + ")");
+            targets = java.util.Collections.singletonList(scanTarget);
+        }
+
+        String baseUrl = "http://127.0.0.1:" + httpP + "/rest";
+        for (String p : targets) {
+            scanOne(baseUrl, p);
+        }
+        println("");
+    }
+
+    /** Reindex one project synchronously, printing progress as files/chunks accumulate. */
+    private static void scanOne(String baseUrl, String project) {
+        println("");
+        println("Scanning " + project + "...");
+
+        String reindexBody = "{\"_method\":\"reindex\",\"_class\":\"services/RAGAdmin\",\"project\":\"" + project + "\"}";
+        String resp = httpPostJson(baseUrl, reindexBody);
+        if (resp.startsWith("error:")) {
+            println("  " + resp);
+            return;
+        }
+        if (!(resp.contains("\"started\":true") || resp.contains("\"started\": true"))) {
+            String msg = extractJsonString(resp, "message");
+            println("  rejected: " + (msg != null ? msg : (resp.length() > 160 ? resp.substring(0, 160) + "…" : resp)));
+            return;
+        }
+
+        long startMs = System.currentTimeMillis();
+        String statusBody = "{\"_method\":\"status\",\"_class\":\"services/RAGAdmin\",\"project\":\"" + project + "\"}";
+        int lastFiles = -1, lastChunks = -1;
+        long lastPrintMs = 0L;
+        while (true) {
+            try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            String sresp = httpPostJson(baseUrl, statusBody);
+            if (sresp.startsWith("error:")) {
+                println("  status poll failed: " + sresp);
+                return;
+            }
+            // RAGAdmin.status returns camelCase ("fileCount", "chunkCount").
+            // The MCP index_status tool returns snake_case; this client talks
+            // to the JSON-RPC service, so camelCase is what we want here.
+            boolean indexing = sresp.contains("\"indexing\":true") || sresp.contains("\"indexing\": true");
+            int files  = extractJsonInt(sresp, "fileCount");
+            int chunks = extractJsonInt(sresp, "chunkCount");
+            long now = System.currentTimeMillis();
+            long elapsedSec = (now - startMs) / 1000L;
+            boolean changed = (files != lastFiles) || (chunks != lastChunks);
+            boolean heartbeat = (now - lastPrintMs) > 10_000L;
+            if (!indexing) {
+                println(String.format("  [%-8s]  DONE: files=%-7d chunks=%d", humanDuration(elapsedSec), files, chunks));
+                return;
+            }
+            if (changed || heartbeat || lastPrintMs == 0L) {
+                println(String.format("  [%-8s]  files=%-7d chunks=%d", humanDuration(elapsedSec), files, chunks));
+                lastFiles = files;
+                lastChunks = chunks;
+                lastPrintMs = now;
+            }
+        }
+    }
+
+    /** Extract an integer field value out of a JSON-RPC response by key name. Returns 0 if absent. */
+    private static int extractJsonInt(String json, String key) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "\"" + java.util.regex.Pattern.quote(key) + "\"\\s*:\\s*(\\d+)").matcher(json);
+        return m.find() ? Integer.parseInt(m.group(1)) : 0;
+    }
+
+    /** Extract a string field value out of a JSON-RPC response by key name. Returns null if absent. */
+    private static String extractJsonString(String json, String key) {
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "\"" + java.util.regex.Pattern.quote(key) + "\"\\s*:\\s*\"((?:\\\\\"|[^\"])*)\"").matcher(json);
+        return m.find() ? m.group(1) : null;
+    }
+
+    /** Issue a JSON POST and return the response body (or "error: ..." on failure). */
+    private static String httpPostJson(String url, String body) {
+        try {
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Content-Type", "application/json");
+            conn.setDoOutput(true);
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(15000);
+            try (java.io.OutputStream os = conn.getOutputStream()) {
+                os.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+            int code = conn.getResponseCode();
+            java.io.InputStream is = (code >= 200 && code < 400) ? conn.getInputStream() : conn.getErrorStream();
+            byte[] data = is == null ? new byte[0] : is.readAllBytes();
+            return new String(data, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            return "error: " + e.getMessage();
+        }
     }
 
     /**
