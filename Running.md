@@ -380,4 +380,4 @@ continues. Look at the log line to see which file.
 | Logs | `tomcat/logs/catalina.out` |
 | Indexer code | `src/main/backend/scripts/RAGIndexer.groovy` |
 | MCP server code | `src/main/precompiled/org/kissweb/rag/RAGMCPServer.java` |
-| Plans | [RAGPlan.md](RAGPlan.md), [docs/plans/Plan2.md](docs/plans/Plan2.md), [docs/plans/Plan3.md](docs/plans/Plan3.md) |
+| Plans | [RAGPlan.md](RAGPlan.md) |

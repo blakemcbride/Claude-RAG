@@ -170,5 +170,3 @@ WSL or manual translation of the bash scripts.
 - **[Running.md](Running.md)** — operating manual: start/stop, adding a
   project, daily commands, troubleshooting.
 - **[RAGPlan.md](RAGPlan.md)** — original design doc.
-- **[docs/plans/Plan2.md](docs/plans/Plan2.md)** — multi-project rollout.
-- **[docs/plans/Plan3.md](docs/plans/Plan3.md)** — public-release hardening.

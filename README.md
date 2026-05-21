@@ -99,8 +99,6 @@ output at each one), see [Setup.md](Setup.md).
 - [Running.md](Running.md) — operating instructions: start/stop, adding a
   project, daily commands, troubleshooting.
 - [RAGPlan.md](RAGPlan.md) — the original single-project design doc.
-- [docs/plans/Plan2.md](docs/plans/Plan2.md) — multi-project rollout.
-- [docs/plans/Plan3.md](docs/plans/Plan3.md) — public-release hardening.
 
 ## License
 
