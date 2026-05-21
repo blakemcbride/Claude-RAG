@@ -1,9 +1,9 @@
-# Running Claude-RAG
+# Running Code-RAG
 
 Step-by-step instructions for using the local RAG with Claude Code, starting
 from a fresh system reboot. Every command is meant to be copy-paste-able.
 
-Substitute your own paths for `/path/to/claude-rag` and your own project
+Substitute your own paths for `/path/to/code-rag` and your own project
 name for `myproj` throughout.
 
 ---
@@ -49,7 +49,7 @@ ollama list | grep nomic-embed-text
 ### 1c. Kiss / Tomcat (the RAG server)
 
 ```bash
-cd /path/to/claude-rag
+cd /path/to/code-rag
 ./bld -v start
 ```
 
@@ -96,7 +96,7 @@ have not run the first index yet.
 ## 3. Working with an existing project
 
 Existing projects are already in `src/main/backend/rag-projects.json` and
-their schemas already exist in `claude_rag`. The cron sweep refreshes
+their schemas already exist in `code_rag`. The cron sweep refreshes
 them every 10 minutes — incremental sweeps are cheap (SHA check per
 file, no work when nothing has changed). You can also force a refresh
 on demand with `./bld scan <project|all>` (see §7) or via the JSON-RPC
@@ -148,7 +148,7 @@ Rules:
 ./bld -v start
 ```
 
-`KissInit.init2` runs at startup; it creates the new schema in `claude_rag`
+`KissInit.init2` runs at startup; it creates the new schema in `code_rag`
 with the right tables, indexes, and seed `rag_meta` rows (idempotent — safe
 to run repeatedly).
 
@@ -165,9 +165,9 @@ curl -s -X POST http://localhost:17080/rest \
 Watch progress:
 
 ```bash
-while [ "$(psql -U postgres -d claude_rag -tAc \
+while [ "$(psql -U postgres -d code_rag -tAc \
     "SELECT value FROM myproj.rag_meta WHERE key='reindex_running'")" = "true" ]; do
-  psql -U postgres -d claude_rag -tAc \
+  psql -U postgres -d code_rag -tAc \
     "SELECT 'files=' || (SELECT count(*) FROM myproj.rag_file) || \
             ', chunks=' || (SELECT count(*) FROM myproj.rag_chunk)"
   sleep 10
@@ -180,32 +180,19 @@ finishes in ~10–25 minutes.
 
 ---
 
-## 5. Register with Claude Code
+## 5. Register with your agent
 
-One MCP server per project the session needs. The URL carries the project
-name; the same shared secret authenticates everything.
+Each project is exposed as one MCP server at
+`http://127.0.0.1:17080/rag-mcp/<project>`, authenticated by the
+`X-RAG-Token` header (value from `RAGMCPSharedSecret` in
+`application.ini`). The exact registration command depends on which
+client you use:
 
-Grab your secret from `application.ini` and pass it as a header:
+- **Claude Code** — see [ClaudeCode.md](ClaudeCode.md).
+- **OpenAI Codex CLI** — see [Codex.md](Codex.md).
 
-```bash
-SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
-
-claude mcp add --transport http myproj \
-    http://127.0.0.1:17080/rag-mcp/myproj \
-    --header "X-RAG-Token: $SECRET"
-```
-
-Repeat for each project you have. Rotating the secret means editing
-`RAGMCPSharedSecret` in `application.ini`, restarting Kiss, and rerunning
-the `claude mcp add` lines.
-
-After registration:
-1. Open Claude Code in a working directory belonging to that project.
-2. Only enable the matching MCP server for that session. Different sessions
-   pointed at different projects will not see each other's index.
-3. Try a prompt that invokes the tool:
-   *"Use mcp__myproj__search_code to find where login is handled."*
-   Claude will call `search_code`, then `Read` the absolute_path from a top hit.
+If you rotate the shared secret in `application.ini`, restart Kiss and
+re-register the MCP entry in whichever client(s) you use.
 
 ---
 
@@ -326,7 +313,7 @@ fully remove:
 ./bld -v start
 
 # 2. Drop the schema explicitly (irreversible):
-psql -U postgres -d claude_rag -c "DROP SCHEMA myproj CASCADE;"
+psql -U postgres -d code_rag -c "DROP SCHEMA myproj CASCADE;"
 
 # 3. Remove the MCP entry from Claude Code:
 claude mcp remove myproj
@@ -363,7 +350,7 @@ automatically (`KissInit.init2` resets every project's `reindex_running`).
 If you want to clear it without restarting:
 
 ```bash
-psql -U postgres -d claude_rag -c \
+psql -U postgres -d code_rag -c \
   "UPDATE <project>.rag_meta SET value='false' WHERE key='reindex_running';"
 ```
 
@@ -395,8 +382,8 @@ continues. Look at the log line to see which file.
 
 | Thing | Where |
 |---|---|
-| Database | `claude_rag` (PostgreSQL local) |
-| Per-project schema | `claude_rag.<project>.rag_file` / `rag_chunk` / `rag_meta` |
+| Database | `code_rag` (PostgreSQL local) |
+| Per-project schema | `code_rag.<project>.rag_file` / `rag_chunk` / `rag_meta` |
 | Embedding model | `nomic-embed-text:v1.5` (Ollama) |
 | Tomcat port | `17080` (localhost only) |
 | MCP URL | `http://127.0.0.1:17080/rag-mcp/<project>` |

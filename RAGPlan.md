@@ -1,4 +1,4 @@
-# Claude-RAG — Design Reference
+# Code-RAG — Design Reference
 
 This is the design doc. Read it after [Overview.md](Overview.md) when you
 want to extend, debug, or fork the system. The README, Overview, Setup,
@@ -36,7 +36,7 @@ Hard constraints:
                        |  admin svc + cron      |                     |
                        |  (Groovy, hot-reload)  |                     v
                        +-----------+------------+      +-------------------------------+
-                                   |                   |  PostgreSQL (claude_rag DB)   |
+                                   |                   |  PostgreSQL (code_rag DB)   |
                                    v                   |  one schema per project       |
                        +------------------------+      |    <project>.rag_file         |
                        |  RAGIndexer (Groovy)   | ---> |    <project>.rag_chunk        |
@@ -63,18 +63,18 @@ The four moving pieces:
 | MCP server | Java, extends `MCPServerBase` | `src/main/precompiled/org/kissweb/rag/RAGMCPServer.java` |
 | Indexer + admin + cron | Groovy, hot-reloadable | `src/main/backend/{scripts,services,CronTasks}/` |
 | Project config + schema bootstrap | Java + Groovy | `ProjectRegistry.java`, `ProjectBootstrap.groovy` |
-| Vector store | PostgreSQL + pgvector | `claude_rag.<project>.*` |
+| Vector store | PostgreSQL + pgvector | `code_rag.<project>.*` |
 
 Everything but Claude Code itself runs on `127.0.0.1`. Tomcat binds to
 localhost only.
 
 ## 3. Vector store
 
-One database (`claude_rag`), one schema per project, identical table
+One database (`code_rag`), one schema per project, identical table
 layout in each schema.
 
 ```sql
-CREATE EXTENSION IF NOT EXISTS vector;          -- once, in claude_rag
+CREATE EXTENSION IF NOT EXISTS vector;          -- once, in code_rag
 CREATE SCHEMA  IF NOT EXISTS <project>;          -- once per project, automatic
 
 -- Per project — `<project>.rag_meta`:

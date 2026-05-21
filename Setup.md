@@ -1,6 +1,6 @@
 # Setup
 
-Step-by-step procedure to install and configure Claude-RAG from scratch.
+Step-by-step procedure to install and configure Code-RAG from scratch.
 
 Each step gives the exact command and what a successful result looks like.
 After the last step you'll have a working server, an indexed project, and
@@ -31,8 +31,8 @@ otherwise.
 ## 1. Get the code
 
 ```bash
-git clone <repo-url> claude-rag
-cd claude-rag
+git clone <repo-url> code-rag
+cd code-rag
 ```
 
 Replace `<repo-url>` with wherever you're cloning from. Every subsequent
@@ -65,7 +65,7 @@ Re-running is safe. If either real file already exists, it is left alone.
 
 ---
 
-## 3. Tell Claude-RAG what to index
+## 3. Tell Code-RAG what to index
 
 Edit `src/main/backend/rag-projects.json`. Replace the placeholder `demo`
 project with one of your own:
@@ -109,14 +109,14 @@ an independent schema and an independent MCP URL.
 One time only:
 
 ```bash
-createdb -U postgres claude_rag
-psql -U postgres -d claude_rag -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+createdb -U postgres code_rag
+psql -U postgres -d code_rag -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 ```
 
 Verify:
 
 ```bash
-psql -U postgres -d claude_rag -c "\dx vector"
+psql -U postgres -d code_rag -c "\dx vector"
 ```
 
 Expected: one row showing the `vector` extension.
@@ -196,7 +196,7 @@ echo "ready"
 Verify the project's schema was bootstrapped:
 
 ```bash
-psql -U postgres -d claude_rag -c "SELECT schema_name FROM information_schema.schemata
+psql -U postgres -d code_rag -c "SELECT schema_name FROM information_schema.schemata
                                     WHERE schema_name NOT IN ('information_schema','pg_catalog','pg_toast','public');"
 ```
 
@@ -225,9 +225,9 @@ If you'd rather watch directly from the database while the auto-scan
 runs:
 
 ```bash
-while [ "$(psql -U postgres -d claude_rag -tAc \
+while [ "$(psql -U postgres -d code_rag -tAc \
     "SELECT value FROM myproj.rag_meta WHERE key='reindex_running'")" = "true" ]; do
-  psql -U postgres -d claude_rag -tAc \
+  psql -U postgres -d code_rag -tAc \
     "SELECT 'files=' || (SELECT count(*) FROM myproj.rag_file) || \
             ', chunks=' || (SELECT count(*) FROM myproj.rag_chunk)"
   sleep 10
@@ -248,48 +248,19 @@ out the `*/10 * * * * RAGSweep` line in that crontab.
 
 ---
 
-## 9. Register the MCP server with Claude Code
+## 9. Register the MCP server with your agent
 
-Once per project:
+Each project is exposed as one MCP server at
+`http://127.0.0.1:17080/rag-mcp/<project>`, authenticated by the
+`X-RAG-Token` header (value: `RAGMCPSharedSecret` in
+`application.ini`). The exact registration command differs by client
+— follow the one for your agent:
 
-```bash
-SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
+- **Claude Code** — [ClaudeCode.md](ClaudeCode.md).
+- **OpenAI Codex CLI** — [Codex.md](Codex.md).
 
-claude mcp add --transport http myproj \
-    http://127.0.0.1:17080/rag-mcp/myproj \
-    --header "X-RAG-Token: $SECRET"
-```
-
-Verify:
-
-```bash
-claude mcp list
-```
-
-Expected: `myproj` appears in the list.
-
-If you ever rotate the secret in `application.ini`, restart the server
-and re-run `claude mcp add` (it will replace the existing entry).
-
----
-
-## 10. Use it from Claude Code
-
-Start a Claude Code session inside the project's working tree. Enable the
-matching MCP server for that session, then try a prompt:
-
-> *Use `mcp__myproj__search_code` to find where login is handled.*
-
-Claude will call `search_code`, get a list of hits with file paths and
-line ranges, then typically follow up with `Read` on the top hit's
-`absolute_path` and line range.
-
-If you don't see the `mcp__myproj__*` tools, check:
-
-1. The server is running: `curl http://localhost:17080/rag-mcp/myproj -X POST -H "X-RAG-Token: $SECRET" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'` returns JSON.
-2. The registration is visible: `claude mcp list`.
-3. You restarted the Claude Code session after registering (MCP servers
-   connect at session start).
+Each guide also covers verification and how to rotate the shared
+secret.
 
 ---
 

@@ -1,11 +1,10 @@
-# Using Claude-RAG with OpenAI Codex CLI
+# Using Code-RAG with OpenAI Codex CLI
 
-Claude-RAG ships under that name because that's the agent I built it for,
-but the server is a stock MCP implementation: standard JSON-RPC over HTTP,
-the published MCP `2025-06-18` handshake, and no Claude-specific
-extensions. Any MCP-capable client can drive it — this file documents the
-specifics for [OpenAI's Codex CLI](https://developers.openai.com/codex/cli/reference),
-which is the most common alternative.
+Code-RAG's server is a stock MCP implementation: standard JSON-RPC
+over HTTP, the published MCP `2025-06-18` handshake, no client-specific
+extensions. Any MCP-capable agent can drive it — this file documents
+the specifics for [OpenAI's Codex CLI](https://developers.openai.com/codex/cli/reference),
+which is the most common alternative to Claude Code.
 
 The repo's existing documentation
 ([Setup.md](Setup.md), [Running.md](Running.md), [RAGPlan.md](RAGPlan.md))
@@ -18,7 +17,7 @@ registers one via an entry in `~/.codex/config.toml`.
 
 ## 0. Prerequisites
 
-- Claude-RAG is installed and the server is running on its default
+- Code-RAG is installed and the server is running on its default
   loopback URL `http://127.0.0.1:17080/`. (See [Setup.md](Setup.md).)
 - At least one project is configured in
   `src/main/backend/rag-projects.json` and its index is populated. Test
@@ -32,7 +31,7 @@ registers one via an entry in `~/.codex/config.toml`.
 Codex's MCP config lives in `~/.codex/config.toml`. The HTTP-transport
 schema is documented in
 [Codex's MCP reference](https://developers.openai.com/codex/mcp). For
-Claude-RAG with the default port and a project named `myproj`, add:
+Code-RAG with the default port and a project named `myproj`, add:
 
 ```toml
 [mcp_servers.myproj]
@@ -120,7 +119,7 @@ wrong — see [Running.md](Running.md).
 
 **The four tools are identical for any MCP client.** The server doesn't
 know which agent is calling. So both Codex and Claude Code can register
-against the same Claude-RAG instance and even hit it simultaneously —
+against the same Code-RAG instance and even hit it simultaneously —
 pgvector reads are concurrent-safe and there's no client identity in the
 per-project lock model. Multiple agents on the same project at once is
 fine; they only contend on the shared Ollama GPU during query
@@ -166,6 +165,7 @@ concerned.
 
 ## See also
 
+- [ClaudeCode.md](ClaudeCode.md) — same instructions for Claude Code.
 - [Setup.md](Setup.md) — installing and starting the server.
 - [Running.md](Running.md) — day-to-day operations.
 - [RAGPlan.md](RAGPlan.md) — design reference; §6 covers the MCP server.

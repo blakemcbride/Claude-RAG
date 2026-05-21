@@ -12,7 +12,7 @@
 DatabaseType = PostgreSQL
 DatabaseHost = localhost
 DatabasePort = 5432
-DatabaseName = claude_rag
+DatabaseName = code_rag
 DatabaseUser = postgres
 DatabasePassword = ""
 

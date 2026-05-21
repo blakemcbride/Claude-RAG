@@ -154,7 +154,7 @@ src/main/frontend/lib/jquery*
 /build/
 manual/asciidoc/
 
-# ----- Claude-RAG -----
+# ----- Code-RAG -----
 # Real (secret-bearing) config files — only the *.example files are tracked.
 src/main/backend/application.ini
 src/main/backend/rag-projects.json

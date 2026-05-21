@@ -1,5 +1,5 @@
 {
-  "_comment": "Edit this file to declare your projects. Each project becomes a PostgreSQL schema (in the claude_rag database) and is exposed at /rag-mcp/<name> for Claude Code. Restart the server after editing so the schema is bootstrapped.",
+  "_comment": "Edit this file to declare your projects. Each project becomes a PostgreSQL schema (in the code_rag database) and is exposed at /rag-mcp/<name> for MCP-capable agents (Claude Code, OpenAI Codex CLI, etc.). Restart the server after editing so the schema is bootstrapped.",
 
   "projects": [
     {

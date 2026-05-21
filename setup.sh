@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# setup.sh — first-run setup for Claude-RAG.
+# setup.sh — first-run setup for Code-RAG.
 #
 # What it does:
 #   1. Copies application.ini.example -> application.ini if the real file

@@ -2,7 +2,7 @@
 
 ## What this system is
 
-Claude-RAG is a local, single-machine retrieval-augmented-generation (RAG)
+Code-RAG is a local, single-machine retrieval-augmented-generation (RAG)
 layer that lets [Claude Code](https://docs.claude.com/en/docs/claude-code/overview)
 do semantic search over your own codebases. You point it at one or more
 project directories. It walks them, chunks the source files, generates
@@ -29,7 +29,7 @@ already using. Nothing leaves the host.
                        |    cron + admin svc    |                       |
                        |    (Groovy, in Kiss)   |                       v
                        +-----------+------------+      +-------------------------------+
-                                   |                   |  PostgreSQL (claude_rag DB)   |
+                                   |                   |  PostgreSQL (code_rag DB)   |
                                    v                   |  one schema per project       |
                        +------------------------+      |    <project>.rag_file         |
                        |  RAG indexer (Groovy)  | ---> |    <project>.rag_chunk        |
@@ -82,7 +82,7 @@ already using. Nothing leaves the host.
 ## Multi-project isolation
 
 Each project becomes a separate PostgreSQL schema inside the same
-`claude_rag` database. A search against `/rag-mcp/foo` only ever sees
+`code_rag` database. A search against `/rag-mcp/foo` only ever sees
 `foo.rag_*` tables. Two simultaneous Claude Code sessions, each scoped to
 a different project, can run in parallel with no cross-talk; they only
 contend on the shared Ollama GPU (and pgvector reads are independent).
@@ -152,7 +152,7 @@ WSL or manual translation of the bash scripts.
 
 | Thing | Path |
 |---|---|
-| Per-project schemas | `claude_rag.<project>.{rag_file,rag_chunk,rag_meta}` |
+| Per-project schemas | `code_rag.<project>.{rag_file,rag_chunk,rag_meta}` |
 | Project list + roots | `src/main/backend/rag-projects.json` (gitignored — your real config) |
 | Project list template | `src/main/backend/rag-projects.json.example` (in repo) |
 | Global knobs + secret | `src/main/backend/application.ini` (gitignored) |
