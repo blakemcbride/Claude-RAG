@@ -23,6 +23,9 @@
  */
 
 import org.kissweb.BuildUtils;
+import org.kissweb.json.JSONArray;
+import org.kissweb.json.JSONException;
+import org.kissweb.json.JSONObject;
 
 import static org.kissweb.BuildUtils.*;
 
@@ -80,12 +83,24 @@ public class Tasks {
     public static void main(String[] args) throws Exception {
         args = consumePortOptions(args);
         args = consumeYesFlag(args);
-        args = consumeScanArg(args);
+        args = consumeCommandArgs(args);
         BuildUtils.build(args, Tasks.class, LIBS);
     }
 
     /** Argument captured by {@code scan <project|all>} on the command line. */
     static String scanTarget = null;
+
+    /**
+     * Positional args captured after a known multi-arg command name
+     * (everything that follows the command on the CLI). Tasks like
+     * {@link #newProject()} read this directly. Empty by default.
+     */
+    static String[] commandArgs = new String[0];
+
+    /** Commands whose trailing CLI positionals are slurped into {@link #commandArgs}. */
+    private static final java.util.Set<String> COMMANDS_WITH_ARGS =
+            new java.util.HashSet<>(java.util.Arrays.asList(
+                    "scan", "new-project", "remove-project", "add-root", "remove-root"));
 
     /** Set by {@code -y} / {@code --yes} — suppress the confirmation prompt before destructive reconcile actions. */
     static boolean assumeYes = false;
@@ -103,23 +118,30 @@ public class Tasks {
     }
 
     /**
-     * Pull the positional argument immediately after the {@code scan}
-     * task name out of the argument list. Stores it in {@link #scanTarget}
-     * so the {@link #scan()} method can read it after BuildUtils dispatch.
-     * If {@code scan} is present without a following arg, leaves
-     * {@code scanTarget} null and lets {@link #scan()} print usage.
+     * Pull positional args following any of {@link #COMMANDS_WITH_ARGS} out
+     * of the argument list and stash them in {@link #commandArgs} so the
+     * task method can read them after BuildUtils dispatch.
+     *
+     * <p>BuildUtils dispatches tasks by the first non-option name and
+     * ignores extras, so we strip them from argv but keep the command
+     * name itself. For backward compatibility {@code scan}'s first
+     * positional is also mirrored into the legacy {@link #scanTarget}
+     * field.</p>
      */
-    private static String[] consumeScanArg(String[] args) {
+    private static String[] consumeCommandArgs(String[] args) {
         java.util.List<String> out = new java.util.ArrayList<>(args.length);
         for (int i = 0; i < args.length; i++) {
-            if ("scan".equals(args[i])) {
-                out.add("scan");
-                if (i + 1 < args.length) {
-                    scanTarget = args[i + 1];
-                    i++;
-                }
+            String a = args[i];
+            if (COMMANDS_WITH_ARGS.contains(a)) {
+                out.add(a);
+                java.util.List<String> captured = new java.util.ArrayList<>();
+                while (i + 1 < args.length)
+                    captured.add(args[++i]);
+                commandArgs = captured.toArray(new String[0]);
+                if ("scan".equals(a) && commandArgs.length >= 1)
+                    scanTarget = commandArgs[0];
             } else {
-                out.add(args[i]);
+                out.add(a);
             }
         }
         return out.toArray(new String[0]);
@@ -204,14 +226,42 @@ public class Tasks {
      *
      * @see BuildUtils#build
      */
+    /**
+     * Print the user-facing operational commands. Shared between
+     * {@link #listTasks()} (which appends the build/dev commands)
+     * and {@link #commands()} (which doesn't, so {@code code-rag}
+     * with no args shows only what's relevant to users).
+     */
+    private static void printOperationalCommands() {
+        println("start                                     build and run backend in the background");
+        println("stop                                      stop the background backend");
+        println("status                                    report whether the system is running and its config");
+        println("scan <project|all>                        reconcile rag-projects.json then rescan");
+        println("new-project <name> <root> [<root>...]     add a project + bootstrap + register MCP entries");
+        println("remove-project <name>                     drop a project + deregister MCP entries");
+        println("add-root <name> <root> [<root>...]        add roots to an existing project");
+        println("remove-root <name> <root> [<root>...]     remove roots from an existing project");
+    }
+
+    /**
+     * User-facing command list. This is what {@code code-rag} (no args)
+     * prints — operational commands only, no build/dev/cleanup noise.
+     * For the full developer view, use {@code bld list-tasks}.
+     */
+    public static void commands() {
+        println("");
+        printOperationalCommands();
+        println("");
+        println("Project names must match [a-z][a-z0-9_]* (dashes are auto-rewritten to underscores).");
+        println("Run 'bld list-tasks' (from inside CODE_RAG_HOME) for build/dev tasks.");
+        println("");
+    }
+
     public static void listTasks() {
         println("");
-        println("start                    build and run backend in the background");
-        println("stop                     stop the background backend");
-        println("status                   report whether the system is running and its config");
-        println("scan <project|all>       trigger an incremental rescan of one project or all");
-        println("build                    build the entire system but don't run it");
-        println("war                      create deployable war file");
+        printOperationalCommands();
+        println("build                                     build the entire system but don't run it");
+        println("war                                       create deployable war file");
 
         println("");
         println("clean                    remove all compiled files");
@@ -824,6 +874,567 @@ public class Tasks {
      * reflect what's actually deployed rather than what the next
      * invocation would use.
      */
+    // ----- Project / root management ----------------------------------------
+    //
+    // These four tasks edit src/main/backend/rag-projects.json, sync the
+    // runtime copies under work/exploded and tomcat/webapps so the running
+    // server picks them up, drive bld scan (which reconciles + indexes),
+    // and (for new/remove-project) maintain MCP entries in whichever
+    // clients are installed (Claude Code, Codex CLI).
+
+    private static final String PROJECTS_JSON_PATH = "src/main/backend/rag-projects.json";
+    private static final String APP_INI_PATH       = "src/main/backend/application.ini";
+    private static final String[] RUNTIME_PROJECTS_COPIES = {
+            "work/exploded/WEB-INF/backend/rag-projects.json",
+            "tomcat/webapps/ROOT/WEB-INF/backend/rag-projects.json"
+    };
+    private static final String MCP_BASE_URL = "http://127.0.0.1:17080/rag-mcp";
+    private static final java.util.regex.Pattern PROJECT_NAME_RE =
+            java.util.regex.Pattern.compile("[a-z][a-z0-9_]*");
+
+    /**
+     * Add a new project to rag-projects.json with the given roots, sync
+     * runtime copies, scan it (which bootstraps the schema via reconcile
+     * + indexes the roots), and register MCP entries with any installed
+     * clients.
+     */
+    public static void newProject() {
+        if (commandArgs.length < 2) {
+            System.err.println("Usage: ./bld new-project <name> <root> [<root>...]");
+            System.exit(1);
+        }
+        String name = canonicalizeProjectName(commandArgs[0]);
+        if (!requireValidProjectName(name))
+            System.exit(1);
+        JSONObject cfg = loadProjectsJson();
+        if (cfg == null)
+            System.exit(1);
+        if (findProject(cfg, name) != null) {
+            System.err.println("Project '" + name + "' already exists in rag-projects.json (use add-root to extend it).");
+            System.exit(1);
+        }
+        JSONArray roots = resolveRootsStrict(commandArgs, 1);
+        if (roots == null)
+            System.exit(1);
+        JSONObject project = new JSONObject();
+        project.put("name", name);
+        project.put("roots", roots);
+        cfg.getJSONArray("projects").put(project);
+        if (!saveProjectsJson(cfg))
+            System.exit(1);
+        syncProjectsRuntimeCopies();
+        scanTarget = name;
+        scan();
+        registerMcpEntries(name);
+    }
+
+    /**
+     * Remove a project from rag-projects.json (refuses on the last
+     * remaining project), sync runtime copies, deregister MCP entries
+     * from installed clients, then run bld -y scan all so reconcile
+     * drops the schema without re-prompting.
+     */
+    public static void removeProject() {
+        if (commandArgs.length != 1) {
+            System.err.println("Usage: ./bld remove-project <name>");
+            System.exit(1);
+        }
+        String name = canonicalizeProjectName(commandArgs[0]);
+        if (!requireValidProjectName(name))
+            System.exit(1);
+        JSONObject cfg = loadProjectsJson();
+        if (cfg == null)
+            System.exit(1);
+        if (findProject(cfg, name) == null) {
+            System.err.println("Project '" + name + "' is not in rag-projects.json.");
+            System.exit(1);
+        }
+        JSONArray projects = cfg.getJSONArray("projects");
+        if (projects.length() == 1) {
+            System.err.println("Cannot remove '" + name + "': it is the only configured project.");
+            System.err.println("Add another project first, or drop the schema manually with:");
+            System.err.println("    psql -d code_rag -c 'DROP SCHEMA " + name + " CASCADE'");
+            System.exit(1);
+        }
+        JSONArray remaining = new JSONArray();
+        for (int i = 0; i < projects.length(); i++) {
+            JSONObject p = projects.getJSONObject(i);
+            if (!name.equals(p.getString("name")))
+                remaining.put(p);
+        }
+        cfg.put("projects", remaining);
+        if (!saveProjectsJson(cfg))
+            System.exit(1);
+        syncProjectsRuntimeCopies();
+        deregisterMcpEntries(name);
+        // bld -y scan all so reconcile drops the schema without prompting
+        // (the user already committed by typing remove-project).
+        assumeYes = true;
+        scanTarget = "all";
+        scan();
+    }
+
+    /**
+     * Add one or more roots to an existing project. Rejects duplicates.
+     */
+    public static void addRoot() {
+        if (commandArgs.length < 2) {
+            System.err.println("Usage: ./bld add-root <name> <root> [<root>...]");
+            System.exit(1);
+        }
+        String name = canonicalizeProjectName(commandArgs[0]);
+        if (!requireValidProjectName(name))
+            System.exit(1);
+        JSONObject cfg = loadProjectsJson();
+        if (cfg == null)
+            System.exit(1);
+        JSONObject project = findProject(cfg, name);
+        if (project == null) {
+            System.err.println("Project '" + name + "' is not in rag-projects.json (use new-project to create it).");
+            System.exit(1);
+        }
+        JSONArray newRoots = resolveRootsStrict(commandArgs, 1);
+        if (newRoots == null)
+            System.exit(1);
+        JSONArray existing = project.getJSONArray("roots");
+        java.util.Set<String> existingSet = new java.util.HashSet<>();
+        for (int i = 0; i < existing.length(); i++)
+            existingSet.add(existing.getString(i));
+        java.util.List<String> dupes = new java.util.ArrayList<>();
+        for (int i = 0; i < newRoots.length(); i++)
+            if (existingSet.contains(newRoots.getString(i)))
+                dupes.add(newRoots.getString(i));
+        if (!dupes.isEmpty()) {
+            System.err.println("Already configured for '" + name + "':");
+            for (String d : dupes)
+                System.err.println("    " + d);
+            System.exit(1);
+        }
+        for (int i = 0; i < newRoots.length(); i++)
+            existing.put(newRoots.getString(i));
+        if (!saveProjectsJson(cfg))
+            System.exit(1);
+        syncProjectsRuntimeCopies();
+        scanTarget = name;
+        scan();
+    }
+
+    /**
+     * Remove one or more roots from a project. Rejects roots that aren't
+     * currently configured. Refuses to leave the project with zero roots.
+     * Lenient about path existence — the directory may be gone on disk.
+     */
+    public static void removeRoot() {
+        if (commandArgs.length < 2) {
+            System.err.println("Usage: ./bld remove-root <name> <root> [<root>...]");
+            System.exit(1);
+        }
+        String name = canonicalizeProjectName(commandArgs[0]);
+        if (!requireValidProjectName(name))
+            System.exit(1);
+        JSONObject cfg = loadProjectsJson();
+        if (cfg == null)
+            System.exit(1);
+        JSONObject project = findProject(cfg, name);
+        if (project == null) {
+            System.err.println("Project '" + name + "' is not in rag-projects.json.");
+            System.exit(1);
+        }
+        JSONArray toRemove = resolveRootsLenient(commandArgs, 1);
+        JSONArray existing = project.getJSONArray("roots");
+        java.util.Set<String> existingSet = new java.util.HashSet<>();
+        for (int i = 0; i < existing.length(); i++)
+            existingSet.add(existing.getString(i));
+        java.util.List<String> missing = new java.util.ArrayList<>();
+        for (int i = 0; i < toRemove.length(); i++)
+            if (!existingSet.contains(toRemove.getString(i)))
+                missing.add(toRemove.getString(i));
+        if (!missing.isEmpty()) {
+            System.err.println("Not currently configured for '" + name + "':");
+            for (String m : missing)
+                System.err.println("    " + m);
+            System.exit(1);
+        }
+        java.util.Set<String> removeSet = new java.util.HashSet<>();
+        for (int i = 0; i < toRemove.length(); i++)
+            removeSet.add(toRemove.getString(i));
+        JSONArray kept = new JSONArray();
+        for (int i = 0; i < existing.length(); i++)
+            if (!removeSet.contains(existing.getString(i)))
+                kept.put(existing.getString(i));
+        if (kept.length() == 0) {
+            System.err.println("Cannot remove all roots from '" + name + "'. Use remove-project to drop it entirely, or add a new root first.");
+            System.exit(1);
+        }
+        project.put("roots", kept);
+        if (!saveProjectsJson(cfg))
+            System.exit(1);
+        syncProjectsRuntimeCopies();
+        scanTarget = name;
+        scan();
+    }
+
+    // ----- Project-management helpers -----
+
+    /**
+     * Project names become PostgreSQL schema identifiers, which can't
+     * contain dashes. Dash is the only character with an obvious
+     * unambiguous fix (underscore), so we silently rewrite it and
+     * print a note. Other invalid characters fall through to
+     * {@link #requireValidProjectName} which prints the rule.
+     */
+    private static String canonicalizeProjectName(String name) {
+        if (name == null || name.indexOf('-') < 0)
+            return name;
+        String fixed = name.replace('-', '_');
+        println("note: project name '" + name + "' rewritten to '" + fixed
+                + "' (dashes are not valid in PostgreSQL schema names).");
+        return fixed;
+    }
+
+    /**
+     * Validate a project name against the same {@code [a-z][a-z0-9_]*}
+     * rule the server enforces. On failure, print the rule, why it
+     * matters (becomes a PostgreSQL schema name), and a sanitized
+     * suggestion when one can be safely derived.
+     */
+    private static boolean requireValidProjectName(String name) {
+        if (PROJECT_NAME_RE.matcher(name).matches())
+            return true;
+        String suggested = name.toLowerCase()
+                .replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+|_+$", "");
+        System.err.println("Project name '" + name + "' is invalid.");
+        System.err.println("Names become PostgreSQL schema names — they must match [a-z][a-z0-9_]*");
+        System.err.println("(lowercase letters, digits, underscores; must start with a letter).");
+        if (!suggested.isEmpty() && !suggested.equals(name)
+                && PROJECT_NAME_RE.matcher(suggested).matches()) {
+            System.err.println("Try '" + suggested + "' instead.");
+        }
+        return false;
+    }
+
+    /** Load rag-projects.json into a JSONObject, or null on read/parse error (with stderr msg). */
+    private static JSONObject loadProjectsJson() {
+        java.nio.file.Path p = java.nio.file.Paths.get(PROJECTS_JSON_PATH);
+        if (!java.nio.file.Files.exists(p)) {
+            System.err.println(PROJECTS_JSON_PATH + " does not exist.");
+            return null;
+        }
+        try {
+            String content = new String(java.nio.file.Files.readAllBytes(p),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            JSONObject obj = new JSONObject(content);
+            if (!obj.has("projects") || !(obj.get("projects") instanceof JSONArray)) {
+                System.err.println(PROJECTS_JSON_PATH + " has no top-level 'projects' array.");
+                return null;
+            }
+            return obj;
+        } catch (java.io.IOException | JSONException e) {
+            System.err.println("Cannot read/parse " + PROJECTS_JSON_PATH + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Write the JSON back atomically. Temp file is created in the same
+     * directory as the target so the rename stays on one filesystem
+     * (ATOMIC_MOVE fails across mount points — e.g. when /tmp is tmpfs
+     * and the repo lives on a separate disk).
+     */
+    private static boolean saveProjectsJson(JSONObject obj) {
+        String content = obj.toString(2);
+        java.nio.file.Path dest = java.nio.file.Paths.get(PROJECTS_JSON_PATH);
+        java.nio.file.Path dir  = dest.getParent();
+        try {
+            java.nio.file.Path tmp = java.nio.file.Files.createTempFile(dir, "rag-projects-", ".json.tmp");
+            java.nio.file.Files.write(tmp, content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            java.nio.file.Files.move(tmp, dest,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            return true;
+        } catch (java.io.IOException e) {
+            System.err.println("Cannot write " + PROJECTS_JSON_PATH + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Copy the canonical rag-projects.json into the runtime locations
+     * (work/exploded and tomcat/webapps) so the running server picks up
+     * the change. ProjectRegistry reads from the deployed copy. Each
+     * destination is skipped with a warning if its parent doesn't exist
+     * (e.g. server has never been built).
+     */
+    private static void syncProjectsRuntimeCopies() {
+        for (String dest : RUNTIME_PROJECTS_COPIES) {
+            java.nio.file.Path destPath = java.nio.file.Paths.get(dest);
+            java.nio.file.Path parent = destPath.getParent();
+            if (parent == null || !java.nio.file.Files.isDirectory(parent)) {
+                println("warning: " + parent + " does not exist; skipped (start the server once to create it)");
+                continue;
+            }
+            try {
+                java.nio.file.Files.copy(java.nio.file.Paths.get(PROJECTS_JSON_PATH),
+                        destPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.io.IOException e) {
+                System.err.println("warning: copy to " + dest + " failed: " + e.getMessage());
+            }
+        }
+    }
+
+    private static JSONObject findProject(JSONObject cfg, String name) {
+        JSONArray arr = cfg.getJSONArray("projects");
+        for (int i = 0; i < arr.length(); i++) {
+            JSONObject p = arr.getJSONObject(i);
+            if (name.equals(p.getString("name", null)))
+                return p;
+        }
+        return null;
+    }
+
+    /**
+     * Resolve each positional arg from {@code args[offset..]} to an
+     * absolute canonical path. Requires each to be an existing
+     * directory. Returns null and prints an error on the first
+     * unresolvable / non-directory entry. The returned JSONArray
+     * contains String entries suitable for inserting directly into
+     * rag-projects.json.
+     */
+    private static JSONArray resolveRootsStrict(String[] args, int offset) {
+        JSONArray out = new JSONArray();
+        for (int i = offset; i < args.length; i++) {
+            java.io.File f = new java.io.File(args[i]);
+            String abs;
+            try {
+                abs = f.getCanonicalPath();
+            } catch (java.io.IOException e) {
+                System.err.println("Cannot resolve root '" + args[i] + "': " + e.getMessage());
+                return null;
+            }
+            if (!new java.io.File(abs).isDirectory()) {
+                System.err.println("Root does not exist or is not a directory: " + args[i]);
+                return null;
+            }
+            out.put(abs);
+        }
+        return out;
+    }
+
+    /** Like {@link #resolveRootsStrict}, but accepts paths that no longer exist on disk. */
+    private static JSONArray resolveRootsLenient(String[] args, int offset) {
+        JSONArray out = new JSONArray();
+        for (int i = offset; i < args.length; i++) {
+            java.io.File f = new java.io.File(args[i]);
+            String abs;
+            try {
+                abs = f.getCanonicalPath();
+            } catch (java.io.IOException e) {
+                abs = f.getAbsolutePath();
+            }
+            out.put(abs);
+        }
+        return out;
+    }
+
+    // ----- MCP client registration -----
+
+    /** True iff a program named {@code prog} is found on $PATH and executable. */
+    private static boolean isOnPath(String prog) {
+        String path = System.getenv("PATH");
+        if (path == null)
+            return false;
+        for (String dir : path.split(java.io.File.pathSeparator)) {
+            java.io.File f = new java.io.File(dir, prog);
+            if (f.isFile() && f.canExecute())
+                return true;
+        }
+        return false;
+    }
+
+    private static String codexConfigPath() {
+        return System.getProperty("user.home") + "/.codex/config.toml";
+    }
+
+    /** Read RAGMCPSharedSecret from application.ini, "" on missing/empty (auth is off). */
+    private static String readSharedSecret() {
+        java.util.Map<String, String> cfg = readIni(APP_INI_PATH);
+        String secret = cfg.get("RAGMCPSharedSecret");
+        if (secret == null || secret.isEmpty()) {
+            System.err.println("warning: RAGMCPSharedSecret is empty in " + APP_INI_PATH
+                    + " — MCP auth is off (registering anyway).");
+            return "";
+        }
+        return secret;
+    }
+
+    /**
+     * Register the MCP entry for {@code name} with whichever clients are
+     * installed. Silent no-op if neither claude nor codex is detected
+     * (the user just hasn't installed an agent yet).
+     */
+    private static void registerMcpEntries(String name) {
+        String url = MCP_BASE_URL + "/" + name;
+        String secret = readSharedSecret();
+        boolean hasClaude = isOnPath("claude");
+        boolean hasCodex  = isOnPath("codex")
+                || new java.io.File(codexConfigPath()).exists();
+        if (hasClaude)
+            registerClaudeEntry(name, url, secret);
+        if (hasCodex)
+            registerCodexEntry(name, url, secret);
+        if (!hasClaude && !hasCodex)
+            println("Neither claude nor codex detected — skipping MCP client registration.");
+    }
+
+    private static void deregisterMcpEntries(String name) {
+        boolean hasClaude = isOnPath("claude");
+        boolean hasCodex  = isOnPath("codex")
+                || new java.io.File(codexConfigPath()).exists();
+        if (hasClaude)
+            deregisterClaudeEntry(name);
+        if (hasCodex)
+            deregisterCodexEntry(name);
+    }
+
+    /** {@code claude mcp add --transport http --scope user ...} — pre-removes any prior entry. */
+    private static void registerClaudeEntry(String name, String url, String secret) {
+        runSilent("claude", "mcp", "remove", name);
+        int code = runInherited("claude", "mcp", "add",
+                "--transport", "http", "--scope", "user", name, url,
+                "--header", "X-RAG-Token: " + secret);
+        if (code == 0) {
+            println("registered MCP entry with Claude Code (user scope)");
+        } else {
+            System.err.println("warning: claude mcp add failed for '" + name + "'. Register manually with:");
+            System.err.println("    claude mcp add --transport http --scope user " + name + " "
+                    + url + " --header \"X-RAG-Token: ...\"");
+        }
+    }
+
+    private static void deregisterClaudeEntry(String name) {
+        if (runSilent("claude", "mcp", "remove", name) == 0)
+            println("removed MCP entry from Claude Code");
+    }
+
+    /** Append/replace [mcp_servers.<name>] in ~/.codex/config.toml. */
+    private static void registerCodexEntry(String name, String url, String secret) {
+        String path = codexConfigPath();
+        java.io.File f = new java.io.File(path);
+        java.io.File parent = f.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            System.err.println("warning: cannot create " + parent + " — skipped Codex registration");
+            return;
+        }
+        try {
+            if (!f.exists() && !f.createNewFile()) {
+                System.err.println("warning: cannot create " + path + " — skipped Codex registration");
+                return;
+            }
+            removeCodexSection(path, name, true);
+            String existing = readUtf8(f);
+            // Trim trailing blank lines so consecutive add/remove cycles don't accumulate.
+            while (existing.endsWith("\n\n"))
+                existing = existing.substring(0, existing.length() - 1);
+            StringBuilder sb = new StringBuilder(existing);
+            if (!existing.isEmpty() && !existing.endsWith("\n"))
+                sb.append("\n");
+            if (!existing.isEmpty())
+                sb.append("\n");
+            sb.append("[mcp_servers.").append(name).append("]\n");
+            sb.append("url = \"").append(url).append("\"\n");
+            sb.append("http_headers = { \"X-RAG-Token\" = \"").append(secret).append("\" }\n");
+            writeUtf8(f, sb.toString());
+            println("added [mcp_servers." + name + "] to " + path);
+        } catch (java.io.IOException e) {
+            System.err.println("warning: failed to update " + path + ": " + e.getMessage());
+        }
+    }
+
+    private static void deregisterCodexEntry(String name) {
+        String path = codexConfigPath();
+        if (!new java.io.File(path).exists())
+            return;
+        if (removeCodexSection(path, name, false))
+            println("removed [mcp_servers." + name + "] from " + path);
+    }
+
+    /**
+     * Delete the {@code [mcp_servers.<name>]} section (header + everything
+     * up to the next {@code [...]} header or EOF) from the given TOML file.
+     * Returns true if a section was actually removed.
+     */
+    private static boolean removeCodexSection(String path, String name, boolean quiet) {
+        java.io.File f = new java.io.File(path);
+        if (!f.exists())
+            return false;
+        String target = "[mcp_servers." + name + "]";
+        try {
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(f.toPath(),
+                    java.nio.charset.StandardCharsets.UTF_8);
+            java.util.List<String> out = new java.util.ArrayList<>(lines.size());
+            boolean skipping = false;
+            boolean found = false;
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (trimmed.equals(target)) {
+                    skipping = true;
+                    found = true;
+                    continue;
+                }
+                if (skipping && trimmed.startsWith("["))
+                    skipping = false;
+                if (!skipping)
+                    out.add(line);
+            }
+            if (!found)
+                return false;
+            StringBuilder sb = new StringBuilder();
+            for (String l : out)
+                sb.append(l).append("\n");
+            writeUtf8(f, sb.toString());
+            return true;
+        } catch (java.io.IOException e) {
+            if (!quiet)
+                System.err.println("warning: failed to edit " + path + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    private static String readUtf8(java.io.File f) throws java.io.IOException {
+        return new String(java.nio.file.Files.readAllBytes(f.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static void writeUtf8(java.io.File f, String content) throws java.io.IOException {
+        java.nio.file.Files.write(f.toPath(),
+                content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    /** Run a command with inherited stdio; returns exit code (-1 on launch failure). */
+    private static int runInherited(String... cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.inheritIO();
+            return pb.start().waitFor();
+        } catch (java.io.IOException | InterruptedException e) {
+            System.err.println("Failed to run " + String.join(" ", cmd) + ": " + e.getMessage());
+            return -1;
+        }
+    }
+
+    /** Run a command discarding stdio; returns exit code (-1 on launch failure). */
+    private static int runSilent(String... cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            return pb.start().waitFor();
+        } catch (java.io.IOException | InterruptedException e) {
+            return -1;
+        }
+    }
+
     public static void status() {
         String httpP = extractFromFile("tomcat/conf/server.xml",
                 "<Connector port=\"(\\d+)\" protocol=\"HTTP/1\\.1\"", httpPort);

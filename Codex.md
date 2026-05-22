@@ -90,6 +90,14 @@ everywhere by default. Practical consequences:
 
 ## 1. Add the MCP server entry
 
+> **Shortcut:** if you've installed the `code-rag` wrapper (Setup.md §10),
+> `code-rag new-project <name> <root>...` adds the project to
+> `rag-projects.json`, scans it, AND appends the `[mcp_servers.<name>]`
+> section to `~/.codex/config.toml` automatically (and registers with
+> Claude Code if `claude` is also on `$PATH`). The manual procedure
+> below is what that shortcut runs; read it to understand the wiring
+> or when registering a project you didn't create via `code-rag`.
+
 Codex's MCP config lives in `~/.codex/config.toml`. The HTTP-transport
 schema is documented in
 [Codex's MCP reference](https://developers.openai.com/codex/mcp). For

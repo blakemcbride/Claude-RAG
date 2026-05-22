@@ -260,10 +260,97 @@ secret.
 
 ---
 
+## 10. (Optional) Install the `code-rag` wrapper
+
+A tiny shell script at the repo root, `code-rag`, delegates everything
+to `bld` — `cd $CODE_RAG_HOME && exec ./bld "$@"`. All real work
+(status, scan, new-project, remove-project, add-root, remove-root,
+register/deregister MCP entries with Claude Code and Codex) lives in
+`bld` (Tasks.java). The wrapper exists so you don't have to be in
+`$CODE_RAG_HOME` to use those commands. It needs nothing beyond bash
+and a Java install (Java is already required for `bld`).
+
+### 10a. **Required: set `CODE_RAG_HOME`**
+
+> ⚠️ **The `code-rag` script will refuse to run until you set the
+> `CODE_RAG_HOME` environment variable.** It must hold the **absolute
+> path** of this Code-RAG installation directory — the same directory
+> that contains `bld`, `setup.sh`, and `src/`. Without it, every
+> invocation of `code-rag` exits immediately with:
+>
+>     code-rag: CODE_RAG_HOME is not set. Set it to the absolute path of your Code-RAG installation.
+
+Set it in your shell startup file so every new terminal session has
+it. Pick the file your shell actually reads (`~/.bashrc` for bash,
+`~/.zshrc` for zsh, `~/.profile` for sh-style logins):
+
+```bash
+echo "export CODE_RAG_HOME=$(pwd)" >> ~/.bashrc    # run this from inside the Code-RAG dir
+exec bash                                          # reload the shell
+```
+
+Verify the variable is set and points where you expect:
+
+```bash
+echo "$CODE_RAG_HOME"            # should print the absolute path
+ls "$CODE_RAG_HOME/bld"          # should list the bld script
+```
+
+If either of those is wrong, `code-rag` cannot work — fix it before
+continuing.
+
+### 10b. Copy the script onto `$PATH`
+
+```bash
+sudo cp code-rag /usr/local/bin/code-rag    # system-wide
+# or, no sudo required:
+mkdir -p ~/.local/bin && cp code-rag ~/.local/bin/    # per-user
+# make sure ~/.local/bin is on your $PATH if you took the per-user route
+```
+
+### 10c. Smoke test
+
+```bash
+code-rag status     # should print the same block as ./bld status
+```
+
+If you get `CODE_RAG_HOME is not set` here, the shell hasn't picked up
+the change yet — open a fresh terminal or `exec bash` again.
+
+### 10d. Command summary
+
+```bash
+code-rag start                               # build + start the server
+code-rag status                              # is it running? which projects?
+code-rag scan <project|all>                  # incremental reconcile + scan
+code-rag new-project <name> <root>...        # add a project, index it, register MCP entries
+code-rag remove-project <name>               # remove a project (drops schema, deregisters MCP entries)
+code-rag add-root <name> <root>...           # add roots to an existing project
+code-rag remove-root <name> <root>...        # remove roots from an existing project
+code-rag stop                                # stop the server
+```
+
+Each `*-project` / `*-root` command edits
+`$CODE_RAG_HOME/src/main/backend/rag-projects.json`, syncs the live
+copies under `work/exploded/.../backend/` and
+`tomcat/webapps/ROOT/.../backend/`, then runs `bld scan` so the
+reconcile step takes effect immediately. `new-project` and
+`remove-project` additionally maintain `~/.claude.json` (via
+`claude mcp add` / `remove`) and `~/.codex/config.toml` (direct
+section edit) for whichever clients are installed; if a client isn't
+installed, that registration is silently skipped.
+
+Project names must match `[a-z][a-z0-9_]*` (they become PostgreSQL
+schema names). Dashes are auto-rewritten to underscores with a
+note — `code-rag new-project my-proj /path` is accepted and stored as
+`my_proj`.
+
+---
+
 ## What to do next
 
 - Daily operations (status, manual reindex, log tail, stop/restart,
   troubleshooting) → [Running.md](Running.md).
 - Adding a second project → §4 of [Running.md](Running.md) (edit
-  `rag-projects.json`, restart the server, run a full index).
+  `rag-projects.json` or use `code-rag new-project`).
 - Architecture and design rationale → [Overview.md](Overview.md).

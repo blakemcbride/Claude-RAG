@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# code-rag — thin wrapper that delegates everything to $CODE_RAG_HOME/bld.
+# All real work (status, scan, new-project, remove-project, add-root,
+# remove-root, etc.) lives in bld (Tasks.java). This script's only jobs
+# are to enforce CODE_RAG_HOME and to cd into it so bld's relative paths
+# (classpath, build inputs, work/ and tomcat/ outputs) resolve correctly.
+
+if [[ -z "${CODE_RAG_HOME:-}" ]]; then
+    echo "code-rag: CODE_RAG_HOME is not set. Set it to the absolute path of your Code-RAG installation." >&2
+    exit 1
+fi
+if [[ ! -x "$CODE_RAG_HOME/bld" ]]; then
+    echo "code-rag: $CODE_RAG_HOME/bld not found or not executable." >&2
+    exit 1
+fi
+# `code-rag` with no args → show only the operational commands (not bld's
+# build/dev tasks, which are irrelevant to code-rag users).
+[[ $# -eq 0 ]] && set -- commands
+cd "$CODE_RAG_HOME" && exec ./bld "$@"

@@ -81,6 +81,11 @@ ollama pull nomic-embed-text:v1.5
 #    Pick the guide for the client you use:
 #      Claude Code        → ClaudeCode.md
 #      OpenAI Codex CLI   → Codex.md
+
+# 8. (Optional) Install the code-rag wrapper so daily commands don't
+#    require being in this directory. Setup.md §10 covers both copying
+#    the script onto $PATH and (required) exporting CODE_RAG_HOME so
+#    the script knows where the installation lives.
 ```
 
 In any subsequent agent session inside that project's working tree, ask

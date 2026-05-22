@@ -48,6 +48,7 @@ are authoritative — update them rather than reinventing.
 | `src/main/backend/rag-projects.json.example` | Projects template (committed) |
 | `src/main/backend/rag-projects.json` | Live projects list (**gitignored**) |
 | `setup.sh` | First-run setup — copies `.example` → real config + generates random shared secret |
+| `code-rag` | Top-level shell wrapper — 16 lines, `cd $CODE_RAG_HOME && exec ./bld "$@"`. Lets `bld` tasks be invoked from any cwd. Requires only `CODE_RAG_HOME`; everything else is handled by `bld`. |
 
 ## Don't modify (Kiss framework code)
 
@@ -69,14 +70,25 @@ the user can port it upstream rather than carrying a local fork.
 ## bld commands
 
 ```
-./bld start                       # preflight Ollama (URL + embedding model), build, start Tomcat in background
-./bld stop                        # graceful shutdown
-./bld status                      # is it running? which ports? config? projects? MCP entries?
-./bld scan <project|all>          # reconcile rag-projects.json with DB, then incremental sweep
-./bld -y scan <project|all>       # same, but skip the destructive-action confirmation prompt
-./bld build                       # compile precompiled + backend; do not run
-./bld -dp PORT / -hp PORT / -sp PORT   # override JDWP / HTTP / shutdown port for this invocation
+./bld start                                       # preflight Ollama, build, start Tomcat in background
+./bld stop                                        # graceful shutdown
+./bld status                                      # is it running? which ports? config? projects? MCP entries?
+./bld scan <project|all>                          # reconcile rag-projects.json with DB, then incremental sweep
+./bld -y scan <project|all>                       # same, but skip the destructive-action confirmation prompt
+./bld new-project <name> <root> [<root>...]       # add a project, scan it, auto-register MCP entries with Claude Code / Codex
+./bld remove-project <name>                       # drop a project (refuses on last one), auto-deregister MCP entries
+./bld add-root <name> <root> [<root>...]          # add roots to an existing project + scan
+./bld remove-root <name> <root> [<root>...]       # remove roots from a project + scan
+./bld build                                       # compile precompiled + backend; do not run
+./bld -dp PORT / -hp PORT / -sp PORT              # override JDWP / HTTP / shutdown port for this invocation
 ```
+
+Project names are validated against `[a-z][a-z0-9_]*` (PostgreSQL
+schema identifier rule). Dashes are silently rewritten to underscores
+with a note (so `new-project my-proj` is accepted and stored as
+`my_proj`). MCP client maintenance auto-detects: `claude` on `$PATH`
+→ Claude Code is updated; `codex` on `$PATH` or `~/.codex/config.toml`
+exists → Codex is updated; neither → silent skip.
 
 `./bld scan` always reconciles DB state with `rag-projects.json` before
 scanning: creates schemas for new projects, drops schemas for removed

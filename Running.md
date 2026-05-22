@@ -81,6 +81,32 @@ but you haven't indexed it yet.
 
 ---
 
+## 2a. `code-rag` — the convenience wrapper
+
+The repo ships a `code-rag` shell script (top-level) that's a thin
+delegator: `cd $CODE_RAG_HOME && exec ./bld "$@"`. Every command this
+guide describes (`status`, `start`, `stop`, `scan`, plus
+`new-project`, `remove-project`, `add-root`, `remove-root`) is a `bld`
+task — the wrapper just lets you invoke them from any cwd.
+
+> **Requires the `CODE_RAG_HOME` environment variable** to hold the
+> absolute path of the Code-RAG installation — without it the script
+> exits immediately. See Setup.md §10 for installation, including the
+> shell-startup snippet that exports `CODE_RAG_HOME` so every new
+> terminal session has it.
+
+The `*-project` and `*-root` commands edit `rag-projects.json`, sync
+the runtime copies, run reconcile + scan, and (for `new-project` /
+`remove-project`) maintain the MCP entries in `~/.claude.json` and
+`~/.codex/config.toml` for whichever clients are detected (claude /
+codex on `$PATH`, or an existing codex config). Skipping a client is
+silent — no error if you only have one installed.
+
+The rest of this document uses `./bld ...` so it works without the
+wrapper; substitute `code-rag ...` whenever you prefer.
+
+---
+
 ## 3. Working with an existing project
 
 Existing projects are already in `src/main/backend/rag-projects.json` and

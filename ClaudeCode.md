@@ -99,6 +99,14 @@ consequences:
 
 ## 1. Register the MCP server
 
+> **Shortcut:** if you've installed the `code-rag` wrapper (Setup.md §10),
+> `code-rag new-project <name> <root>...` adds the project to
+> `rag-projects.json`, scans it, AND registers the MCP entry with both
+> Claude Code (via `claude mcp add --scope user`) and Codex (TOML
+> section) automatically. The manual procedure below is what that
+> shortcut runs under the hood; read it to understand the wiring or
+> when registering a project you didn't create via `code-rag`.
+
 Claude Code stores MCP registrations in `~/.claude.json`. The
 single-command form using the CLI:
 
