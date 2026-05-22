@@ -51,3 +51,16 @@ RAGCommitBatch   = 50
 ; with this value can call the MCP server. Rotate by editing application.ini
 ; and restarting; also update the --header on the corresponding `claude mcp add`.
 RAGMCPSharedSecret = REPLACE_WITH_RANDOM_UUID
+
+; ----- Windows / WSL2 path translation (optional) -----
+; Only relevant when the server runs in WSL2 and an MCP client running on
+; Windows-native (outside the VM) queries it. Set to your WSL2 distro name
+; (the one shown by `wsl --list --verbose`, e.g. Ubuntu, Debian, Ubuntu-22.04).
+; Activated per-request by clients that send the X-Path-Style: windows header.
+; When activated, search_code / get_chunk / list_repos rewrite absolute_path
+; values so Windows clients can Read them:
+;     /mnt/c/Users/foo/proj -> C:\Users\foo\proj
+;     /home/blake/proj      -> \\wsl$\<distro>\home\blake\proj
+; Default is Ubuntu if unset. See Windows.md for the full setup.
+;
+;WindowsWslDistro = Ubuntu

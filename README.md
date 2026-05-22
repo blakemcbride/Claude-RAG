@@ -105,6 +105,7 @@ output at each one), see [Setup.md](Setup.md).
   project, daily commands, troubleshooting.
 - [ClaudeCode.md](ClaudeCode.md) — registering Code-RAG with Claude Code.
 - [Codex.md](Codex.md) — registering Code-RAG with OpenAI Codex CLI.
+- [Windows.md](Windows.md) — running on Windows (WSL2 recommended; covers cross-boundary use from Windows-native agents).
 - [RAGPlan.md](RAGPlan.md) — the original single-project design doc.
 
 ## License

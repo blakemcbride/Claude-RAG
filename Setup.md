@@ -406,4 +406,6 @@ note — `code-rag new-project my-proj /path` is accepted and stored as
   troubleshooting) → [Running.md](Running.md).
 - Adding a second project → §4 of [Running.md](Running.md) (edit
   `rag-projects.json` or use `code-rag new-project`).
+- Running on Windows (recommended: WSL2; covers cross-boundary
+  Windows-native agents and path translation) → [Windows.md](Windows.md).
 - Architecture and design rationale → [Overview.md](Overview.md).

@@ -71,6 +71,16 @@ public class RAGMCPServer extends MCPServerBase {
      */
     private static final ThreadLocal<String> CURRENT_PROJECT = new ThreadLocal<>();
 
+    /**
+     * Path style requested by the client via the X-Path-Style header.
+     * Currently the only recognized value is "windows", which causes
+     * absolute_path / root strings in responses to be rewritten from
+     * WSL2-style Linux paths to native Windows paths so a Windows
+     * client (Claude Code or Codex running outside WSL2) can Read them.
+     * Null = no translation (default). See Windows.md.
+     */
+    private static final ThreadLocal<String> CURRENT_PATH_STYLE = new ThreadLocal<>();
+
     @Override
     protected String getServerName() {
         return "kiss-rag-mcp";
@@ -113,6 +123,11 @@ public class RAGMCPServer extends MCPServerBase {
             return false;
         }
         CURRENT_PROJECT.set(project);
+        // Record path-style preference for this request. Set unconditionally
+        // (even to null) so a previous request's value can't leak through
+        // Tomcat's pooled thread.
+        String style = request.getHeader("X-Path-Style");
+        CURRENT_PATH_STYLE.set(style == null ? null : style.toLowerCase());
         return true;
     }
 
@@ -462,7 +477,10 @@ public class RAGMCPServer extends MCPServerBase {
 
     /**
      * Resolve a (project, repo, relative-path) tuple to an absolute filesystem
-     * path by consulting rag-projects.json. Cached lazily.
+     * path by consulting rag-projects.json. Cached lazily. The result is then
+     * passed through {@link #translateForCurrentClient(String)} so requests
+     * with an {@code X-Path-Style: windows} header get back Windows-native
+     * paths instead of the server's Linux/WSL2 paths.
      */
     private static String absolutePath(String project, String repo, String relPath) {
         Map<String, Map<String, String>> cache = repoRootCache;
@@ -481,10 +499,67 @@ public class RAGMCPServer extends MCPServerBase {
         }
         Map<String, String> inner = cache.get(project);
         final String root = inner == null ? null : inner.get(repo);
+        final String linuxPath;
         if (root == null)
-            return relPath;
-        if (relPath == null || relPath.isEmpty())
-            return root;
-        return root.endsWith("/") ? root + relPath : root + "/" + relPath;
+            linuxPath = relPath;
+        else if (relPath == null || relPath.isEmpty())
+            linuxPath = root;
+        else
+            linuxPath = root.endsWith("/") ? root + relPath : root + "/" + relPath;
+        return translateForCurrentClient(linuxPath);
+    }
+
+    /**
+     * Translate a Linux/WSL2 absolute path to its Windows equivalent if
+     * the current request set {@code X-Path-Style: windows}. Otherwise
+     * return the path unchanged.
+     *
+     * <p>Two mappings, in order:</p>
+     * <ul>
+     *   <li>{@code /mnt/<drive>/...} → {@code <DRIVE>:\...} — for code that
+     *       physically lives on the Windows filesystem and is mounted into
+     *       WSL2 via DrvFs.</li>
+     *   <li>any other absolute path → {@code \\wsl$\<distro>\...} — for
+     *       code that lives natively on the WSL2 ext4. The distro name
+     *       comes from {@code WindowsWslDistro} in application.ini
+     *       (default {@code Ubuntu}).</li>
+     * </ul>
+     * Relative paths and null are returned as-is.
+     */
+    static String translateForCurrentClient(String path) {
+        if (path == null || path.isEmpty())
+            return path;
+        if (!"windows".equals(CURRENT_PATH_STYLE.get()))
+            return path;
+        return toWindowsPath(path, wslDistro());
+    }
+
+    /** Pure translation (no ThreadLocal access) — package-private for unit testing. */
+    static String toWindowsPath(String linuxPath, String distro) {
+        if (linuxPath == null || linuxPath.isEmpty() || linuxPath.charAt(0) != '/')
+            return linuxPath;
+        // /mnt/<letter>/... or /mnt/<letter> — DrvFs mount.
+        if (linuxPath.length() >= 6
+                && linuxPath.charAt(1) == 'm'
+                && linuxPath.charAt(2) == 'n'
+                && linuxPath.charAt(3) == 't'
+                && linuxPath.charAt(4) == '/'
+                && Character.isLetter(linuxPath.charAt(5))
+                && (linuxPath.length() == 6 || linuxPath.charAt(6) == '/')) {
+            char drive = Character.toUpperCase(linuxPath.charAt(5));
+            String rest = linuxPath.length() > 6 ? linuxPath.substring(7) : "";
+            return drive + ":\\" + rest.replace('/', '\\');
+        }
+        // Anything else under /: it lives on the WSL2 ext4 — reach via UNC.
+        return "\\\\wsl$\\" + distro + linuxPath.replace('/', '\\');
+    }
+
+    /** Lookup the WSL2 distro name from application.ini, defaulting to Ubuntu. */
+    private static String wslDistro() {
+        Object o = MainServlet.getEnvironment("WindowsWslDistro");
+        if (o == null)
+            return "Ubuntu";
+        String s = o.toString().trim();
+        return s.isEmpty() ? "Ubuntu" : s;
     }
 }

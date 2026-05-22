@@ -26,6 +26,7 @@ itself is plain MCP, with no client-specific assumptions.
 | Full design reference, design rationale, gotchas | `RAGPlan.md` |
 | Registering this server with Claude Code | `ClaudeCode.md` |
 | Registering this server with OpenAI Codex CLI | `Codex.md` |
+| Running on Windows (WSL2 + cross-boundary path translation) | `Windows.md` |
 | Kiss framework reference (loaded automatically) | `AI/KnowledgeBase.md` |
 
 If a user asks about behavior that conflicts with these docs, the docs
