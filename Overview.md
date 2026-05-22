@@ -106,8 +106,12 @@ contend on the shared Ollama GPU (and pgvector reads are independent).
   listed in `rag-projects.json` are scanned.
 - Phone home. No outbound network calls from this code beyond Ollama on
   localhost and PostgreSQL on localhost.
-- Auto-drop a project's data when you remove it from the config. You
-  drop the schema by hand — protects against typos losing the index.
+- Silently drop a project's schema when you remove it from the config.
+  `./bld scan` reconciles DB state with `rag-projects.json` and *will*
+  drop a removed project's schema, but it prints the plan and asks
+  `Proceed? [y/N]` first — a JSON typo can't drop a schema unattended.
+  (Per-root deletions are not prompted, because the cron sweep already
+  removes orphan files on its own schedule.)
 
 ## Requirements
 

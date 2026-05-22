@@ -129,34 +129,29 @@ Rules:
 - Each glob is matched against absolute paths. Use the `**/X` and `**/X/**`
   pair to make `preVisitDirectory` skip whole subtrees.
 
-### 4b. Restart Kiss so the bootstrap creates the schema
+### 4b. Run `./bld scan` — it reconciles, then indexes
 
 ```bash
-./bld stop
-./bld -v start
+./bld scan all
 ```
 
-`KissInit.init2` runs at startup; it creates the new schema in `code_rag`
-with the right tables, indexes, and seed `rag_meta` rows (idempotent — safe
-to run repeatedly).
+`bld scan` re-reads `rag-projects.json` before scanning. It detects the
+new project, prints a plan ("Create schemas: myproj"), creates the schema
+in `code_rag` (with tables, indexes, and seed `rag_meta` rows), and then
+scans every project — including the new one. The same is true for
+`./bld scan myproj`: the named project doesn't have to already exist;
+the reconcile step creates it.
 
-### 4c. The first index
-
-You don't need to trigger it. The Kiss startup auto-scan (see §7.4) runs
-an incremental sweep on any project whose `rag_file` is empty right
-after `./bld start`, in a background thread. To watch it complete:
-
-```bash
-./bld scan myproj
-```
-
-`scan` reports `rejected: A reindex is already in progress...` while
-the auto-scan is still running; once it finishes the next `./bld scan
-myproj` triggers a quick incremental top-up and prints per-poll
-progress until done.
+No server restart is required. The non-destructive parts of the plan
+(new schemas, newly-added roots) run without a confirmation prompt.
 
 Throughput is roughly 5–15 files/sec on a modern GPU; a 10k-file
 codebase finishes in ~10–25 minutes for the very first index.
+
+> If you'd rather not run `bld scan` manually, the alternative path
+> still works: restart Kiss (`./bld stop && ./bld -v start`), and the
+> startup auto-scan (see §6) will detect the empty schema and index
+> it in a background thread.
 
 ---
 
@@ -196,7 +191,26 @@ per-project progress in your terminal:
 ```bash
 ./bld scan myproj      # one project, incremental
 ./bld scan all         # every project in rag-projects.json, sequentially
+./bld -y scan all      # skip the destructive-action confirmation prompt
 ```
+
+**Before scanning, `bld scan` reconciles DB state with `rag-projects.json`:**
+
+- **New project in JSON** → its schema is created, then it's scanned (even
+  in single-project mode, the new schema is added to the scan list).
+- **Project removed from JSON** → its schema is `DROP SCHEMA … CASCADE`
+  (interactive `Proceed? [y/N]` prompt unless `-y` is passed).
+- **Root added to an existing project** → that project is added to the
+  scan list so the new files get indexed.
+- **Root removed from an existing project** → the corresponding
+  `rag_file` rows are deleted (cascades to `rag_chunk`). No prompt: the
+  cron sweep already deletes-on-disappearance for missing files within
+  its next tick, so a prompt here would not actually protect the data.
+
+The reconcile plan is always printed first so you see what's about to
+happen. Only `DROP SCHEMA` is gated by the confirmation prompt — that
+is the one mutation the cron will never perform on its own, so the
+prompt is the only thing standing between a JSON typo and lost data.
 
 Sample output:
 
@@ -227,10 +241,12 @@ Whenever Kiss starts (`./bld start`), `KissInit.init2` runs the
 multi-project bootstrap; for any configured project whose `rag_file`
 table is empty (i.e. never scanned, or wiped), a daemon thread runs the
 indexer on it right then. Steady-state restarts are no-ops because every
-project already has rows. Useful in two scenarios:
+project already has rows. Useful when:
 
-- You add a new project to `rag-projects.json` and restart.
-- You wipe an index (`./bld realclean` or a manual `TRUNCATE`) and restart.
+- You added a new project to `rag-projects.json` but haven't yet run
+  `./bld scan` (which would also pick it up — see §4).
+- You wipe an index (`./bld realclean` or a manual `TRUNCATE`) and
+  restart.
 
 Look for `auto-scan starting` and `auto-scan finished` lines in
 `tomcat/logs/catalina.out`.
@@ -266,20 +282,33 @@ never permanently locks anything.
 
 ## 7. Removing a project
 
-By design the system does **not** auto-drop a schema when you remove the
-project from `rag-projects.json` — a typo would otherwise lose data. To
-fully remove:
+Delete the entry from `src/main/backend/rag-projects.json`, then run
+`./bld scan` — it will reconcile DB state with the JSON, prompt you to
+confirm before dropping anything, and `DROP SCHEMA … CASCADE` once
+confirmed:
 
 ```bash
-# 1. Delete the entry from src/main/backend/rag-projects.json and restart:
-./bld stop
-./bld -v start
+# 1. Edit src/main/backend/rag-projects.json — remove the project entry.
 
-# 2. Drop the schema explicitly (irreversible):
-psql -U postgres -d code_rag -c "DROP SCHEMA myproj CASCADE;"
+# 2. Reconcile: bld scan prints a plan, prompts, then drops.
+./bld scan all
+# >> Reconcile plan (DB vs rag-projects.json):
+# >>   Drop schemas (CASCADE — destroys all indexed data):
+# >>     - myproj  (10815 indexed files)
+# >> Proceed with reconciliation? [y/N] y
 
-# 3. Remove the MCP entry from Claude Code:
+# 3. Remove the MCP entry from your client(s):
 claude mcp remove myproj
+# or, for Codex CLI: edit ~/.codex/config.toml
+```
+
+A `bld scan` typo (e.g. forgetting to add the project back to JSON before
+scanning) cannot silently destroy data — the prompt always fires first
+unless you pass `-y`. The old manual fallback still works if you'd rather
+do it yourself:
+
+```bash
+psql -U postgres -d code_rag -c "DROP SCHEMA myproj CASCADE;"
 ```
 
 ---

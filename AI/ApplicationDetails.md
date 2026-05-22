@@ -72,10 +72,22 @@ the user can port it upstream rather than carrying a local fork.
 ./bld start                       # build + start Tomcat in the background
 ./bld stop                        # graceful shutdown
 ./bld status                      # is it running? which ports? config? projects? MCP entries?
-./bld scan <project|all>          # incremental sweep with live progress
+./bld scan <project|all>          # reconcile rag-projects.json with DB, then incremental sweep
+./bld -y scan <project|all>       # same, but skip the destructive-action confirmation prompt
 ./bld build                       # compile precompiled + backend; do not run
 ./bld -dp PORT / -hp PORT / -sp PORT   # override JDWP / HTTP / shutdown port for this invocation
 ```
+
+`./bld scan` always reconciles DB state with `rag-projects.json` before
+scanning: creates schemas for new projects, drops schemas for removed
+projects (CASCADE), deletes `rag_file` rows whose `repo` is no longer a
+configured root, and adds projects with new roots to the scan list. The
+reconcile prompts `Proceed? [y/N]` only for schema drops — that is the
+one mutation the cron sweep will never perform, so a prompt is the only
+thing protecting against data loss from a JSON typo. Root-deletes are
+not prompted: the cron sweep already deletes-on-disappearance on its
+own schedule, so declining a root-delete prompt would only delay the
+inevitable. `-y` skips the drop prompt for scripted use.
 
 Defaults: HTTP `17080`, shutdown `17005`, JDWP `17900`. All three
 auto-stamp into `tomcat/conf/server.xml` and `tomcat/bin/debug` on
@@ -99,13 +111,21 @@ every `./bld start` so per-invocation overrides "stick" for that run.
 2. **Cron sweep** — `*/10 * * * * RAGSweep` (enabled). Each project,
    sequentially, every 10 minutes. Incremental no-op sweeps over a
    10k-file project take ~1 sec.
-3. **`./bld scan <project|all>`** — synchronous with live progress.
+3. **`./bld scan <project|all>`** — reconciles DB vs `rag-projects.json`
+   first (drops removed schemas, creates new ones, deletes/adds
+   per-root entries), then runs a synchronous sweep with live progress.
+   Prompts before destructive ops unless `-y` is given.
 4. **JSON-RPC `RAGAdmin.reindex`** (e.g. `curl` or a script) — async.
    Use `full=true` for a TRUNCATE + rebuild.
+5. **JSON-RPC `RAGAdmin.reconcile`** — the reconcile step in (3), exposed
+   as its own endpoint. `dryRun=true` returns the plan; `dryRun=false`
+   executes. Acquires the per-project lock before any destructive op.
 
-All four share the same per-project lock row
+All sweep paths share the per-project lock row
 (`<project>.rag_meta(key='reindex_running')`), so two sweeps of the
 same project cannot overlap; different projects can sweep in parallel.
+Reconcile also takes the lock for drops and root-deletes (skipping any
+project currently being indexed).
 
 ## Authentication / security
 

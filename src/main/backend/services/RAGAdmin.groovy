@@ -118,6 +118,294 @@ class RAGAdmin {
         outjson.put("message", "Reindex started in background; poll services/RAGAdmin.status with project=${project}")
     }
 
+    /**
+     * Reconcile DB state with rag-projects.json:
+     *   • drop schemas for projects no longer in the file (CASCADE)
+     *   • create schemas + tables for new projects
+     *   • delete rag_file rows whose `repo` (root basename) is no longer
+     *     a configured root for that project
+     *   • detect newly-configured roots on existing projects so the caller
+     *     can include those projects in its scan target list (the sweep
+     *     itself handles the actual indexing — no DB change here)
+     *
+     * Schemas are identified as "Code-RAG project schemas" by the presence
+     * of a rag_meta table (the bootstrap marker). Other schemas are never
+     * touched.
+     *
+     * Per-project lock (rag_meta.reindex_running) is acquired before any
+     * destructive mutation; a project currently being indexed lands in
+     * `blocked` and is skipped without harm.
+     *
+     * Two modes:
+     *   dryRun=true   — report the plan without making changes (default)
+     *   dryRun=false  — execute the plan
+     *
+     * Response (both modes):
+     *   {
+     *     "executed":         <bool>,
+     *     "requiresConfirm":  <bool>,            // true iff plan has drops or root deletes
+     *     "createsNames":     ["new1",...],      // newly-bootstrapped projects
+     *     "rootAddsProjects": ["proj1",...],     // projects that gained roots
+     *     "humanPlan":        "  Drop:\n    ..."
+     *   }
+     * The humanPlan string is empty when there is nothing to do.
+     */
+    void reconcile(JSONObject injson, JSONObject outjson, Connection db, ProcessServlet servlet) {
+        boolean dryRun = injson.getBoolean("dryRun", Boolean.TRUE)
+
+        List<ProjectRegistry.Project> configured
+        try {
+            configured = ProjectRegistry.load()
+        } catch (Exception e) {
+            outjson.put("error", "rag-projects.json: " + e.getMessage())
+            return
+        }
+        Map<String, ProjectRegistry.Project> byName = [:]
+        for (ProjectRegistry.Project p : configured)
+            byName[p.name] = p
+
+        // Existing project schemas: any schema with a rag_meta table.
+        Set<String> existingProjects = new TreeSet<>()
+        for (Record r : db.fetchAll(
+                "SELECT table_schema FROM information_schema.tables " +
+                "WHERE table_name = 'rag_meta' AND table_type = 'BASE TABLE'")) {
+            String s = r.getString("table_schema")
+            if (ProjectRegistry.isValidName(s))
+                existingProjects.add(s)
+        }
+
+        // Plan:
+        //   drops      = existing - configured
+        //   creates    = configured - existing
+        //   rootDels   = for each surviving project, repos in DB not in config
+        //   rootAdds   = for each surviving project, configured roots whose
+        //                basename is not in DB
+        List<String> drops = new ArrayList<>()
+        for (String s : existingProjects)
+            if (!byName.containsKey(s))
+                drops.add(s)
+
+        List<String> creates = new ArrayList<>()
+        for (ProjectRegistry.Project p : configured)
+            if (!existingProjects.contains(p.name))
+                creates.add(p.name)
+
+        // rootDels: project -> list of repo basenames to delete
+        // rootAdds: project -> list of root paths (full path, for display)
+        LinkedHashMap<String, List<String>> rootDels = new LinkedHashMap<>()
+        LinkedHashMap<String, Long> rootDelCounts = new LinkedHashMap<>()
+        LinkedHashMap<String, List<String>> rootAdds = new LinkedHashMap<>()
+        for (String s : existingProjects) {
+            if (!byName.containsKey(s))
+                continue
+            // configuredRepos: basename -> full path (last one wins on dup basename)
+            LinkedHashMap<String, String> configuredRepos = new LinkedHashMap<>()
+            for (String rootPath : byName[s].roots)
+                configuredRepos[new File(rootPath).name] = rootPath
+            Set<String> dbRepos = new HashSet<>()
+            for (Record r : db.fetchAll(
+                    "SELECT repo, count(*) AS n FROM ${s}.rag_file GROUP BY repo ORDER BY repo".toString())) {
+                String repo = r.getString("repo")
+                dbRepos.add(repo)
+                if (!configuredRepos.containsKey(repo)) {
+                    rootDels.computeIfAbsent(s, { k -> new ArrayList<String>() }).add(repo)
+                    rootDelCounts["${s}/${repo}".toString()] = r.getLong("n")
+                }
+            }
+            for (Map.Entry<String, String> e : configuredRepos.entrySet())
+                if (!dbRepos.contains(e.key))
+                    rootAdds.computeIfAbsent(s, { k -> new ArrayList<String>() }).add(e.value)
+        }
+
+        // File counts for drop targets (display only).
+        LinkedHashMap<String, Long> dropCounts = new LinkedHashMap<>()
+        for (String s : drops) {
+            Record r = db.fetchOne("SELECT count(*) AS n FROM ${s}.rag_file".toString())
+            dropCounts[s] = (r != null) ? r.getLong("n") : 0L
+        }
+
+        boolean anyChanges = !drops.isEmpty() || !creates.isEmpty()
+                          || !rootDels.isEmpty() || !rootAdds.isEmpty()
+        // Only DROP SCHEMA needs a confirmation prompt. Root-deletes are not
+        // prompted because the regular cron sweep already deletes-on-disappearance
+        // — declining here only buys one cron tick before the data is gone anyway.
+        // The cron never drops schemas, so drops remain the one path where the
+        // prompt actually protects data from a JSON typo.
+        boolean requiresConfirm = !drops.isEmpty()
+
+        // ---- DRY RUN ----
+        if (dryRun || !anyChanges) {
+            outjson.put("executed", false)
+            outjson.put("requiresConfirm", requiresConfirm)
+            JSONArray ca = new JSONArray()
+            for (String s : creates)
+                ca.put(s)
+            outjson.put("createsNames", ca)
+            JSONArray ra = new JSONArray()
+            for (String s : rootAdds.keySet())
+                ra.put(s)
+            outjson.put("rootAddsProjects", ra)
+            outjson.put("humanPlan",
+                    formatPlan(drops, dropCounts, creates, byName, rootDels, rootDelCounts, rootAdds))
+            return
+        }
+
+        // ---- EXECUTE ----
+        List<String> blocked = new ArrayList<>()
+        List<String> dropped = new ArrayList<>()
+        List<String> created = new ArrayList<>()
+        LinkedHashMap<String, List<String>> deletedRoots = new LinkedHashMap<>()
+
+        // 1. Drops. Acquire the lock first so a sweep can't start mid-drop.
+        for (String s : drops) {
+            if (!tryAcquireLock(db, s)) {
+                blocked.add(s + " (drop)")
+                logger.warn("reconcile: cannot drop '${s}' — sweep in progress")
+                continue
+            }
+            try {
+                db.execute("DROP SCHEMA ${s} CASCADE".toString())
+                db.commit()
+                dropped.add(s)
+                logger.info("reconcile: dropped schema '${s}'")
+            } catch (Exception e) {
+                logger.error("reconcile: drop '${s}' failed", e)
+                try { db.rollback() } catch (Exception ignored) {}
+                try { releaseLock(db, s) } catch (Exception ignored) {}
+                blocked.add(s + " (drop failed: " + e.message + ")")
+            }
+        }
+
+        // 2. Creates. No lock needed — schema does not exist yet.
+        for (String s : creates) {
+            try {
+                GroovyService.run("scripts", "ProjectBootstrap", "ensureOne", null, db, s)
+                created.add(s)
+                logger.info("reconcile: created schema '${s}'")
+            } catch (Exception e) {
+                logger.error("reconcile: create '${s}' failed", e)
+                try { db.rollback() } catch (Exception ignored) {}
+                blocked.add(s + " (create failed: " + e.message + ")")
+            }
+        }
+
+        // 3. Root deletions for surviving projects. Acquire the per-project
+        //    lock so we don't race with a running sweep.
+        for (Map.Entry<String, List<String>> e : rootDels.entrySet()) {
+            String project = e.key
+            List<String> repos = e.value
+            if (!tryAcquireLock(db, project)) {
+                blocked.add(project + " (root-delete)")
+                logger.warn("reconcile: cannot delete roots from '${project}' — sweep in progress")
+                continue
+            }
+            try {
+                List<String> doneRepos = new ArrayList<>()
+                for (String repo : repos) {
+                    db.execute(
+                            "DELETE FROM ${project}.rag_file WHERE repo = ?".toString(),
+                            repo)
+                    doneRepos.add(repo)
+                    logger.info("reconcile: deleted root '${repo}' from project '${project}'")
+                }
+                db.commit()
+                deletedRoots[project] = doneRepos
+            } catch (Exception ex) {
+                logger.error("reconcile: root-delete on '${project}' failed", ex)
+                try { db.rollback() } catch (Exception ignored) {}
+            } finally {
+                try { releaseLock(db, project) } catch (Exception ignored) {}
+            }
+        }
+
+        outjson.put("executed", true)
+        outjson.put("requiresConfirm", requiresConfirm)
+        JSONArray ca = new JSONArray()
+        for (String s : created)
+            ca.put(s)
+        outjson.put("createsNames", ca)
+        JSONArray ra = new JSONArray()
+        for (String s : rootAdds.keySet())
+            ra.put(s)
+        outjson.put("rootAddsProjects", ra)
+        outjson.put("humanPlan",
+                formatExecutionSummary(dropped, created, deletedRoots, rootAdds, blocked))
+    }
+
+    /** Multi-line plan string for the user to read before confirming. */
+    private static String formatPlan(List<String> drops,
+                                     Map<String, Long> dropCounts,
+                                     List<String> creates,
+                                     Map<String, ProjectRegistry.Project> byName,
+                                     Map<String, List<String>> rootDels,
+                                     Map<String, Long> rootDelCounts,
+                                     Map<String, List<String>> rootAdds) {
+        if (drops.isEmpty() && creates.isEmpty() && rootDels.isEmpty() && rootAdds.isEmpty())
+            return ""
+        StringBuilder b = new StringBuilder()
+        if (!drops.isEmpty()) {
+            b.append("  Drop schemas (CASCADE — destroys all indexed data):\n")
+            for (String s : drops)
+                b.append("    - ").append(s).append("  (").append(dropCounts.get(s) ?: 0L).append(" indexed files)\n")
+        }
+        if (!creates.isEmpty()) {
+            b.append("  Create schemas (will be scanned after reconciliation):\n")
+            for (String s : creates) {
+                b.append("    - ").append(s).append("\n")
+                ProjectRegistry.Project p = byName.get(s)
+                if (p != null)
+                    for (String root : p.roots)
+                        b.append("        root: ").append(root).append("\n")
+            }
+        }
+        if (!rootDels.isEmpty()) {
+            b.append("  Delete indexed files under roots no longer configured:\n")
+            for (Map.Entry<String, List<String>> e : rootDels.entrySet())
+                for (String repo : e.value) {
+                    long n = rootDelCounts.get(e.key + "/" + repo) ?: 0L
+                    b.append("    - ").append(e.key).append(" / ").append(repo)
+                            .append("  (").append(n).append(" files)\n")
+                }
+        }
+        if (!rootAdds.isEmpty()) {
+            b.append("  New roots to scan on existing projects:\n")
+            for (Map.Entry<String, List<String>> e : rootAdds.entrySet())
+                for (String path : e.value)
+                    b.append("    - ").append(e.key).append(" : ").append(path).append("\n")
+        }
+        return b.toString()
+    }
+
+    /** Multi-line summary of what was actually done (returned after execute). */
+    private static String formatExecutionSummary(List<String> dropped,
+                                                 List<String> created,
+                                                 Map<String, List<String>> deletedRoots,
+                                                 Map<String, List<String>> rootAdds,
+                                                 List<String> blocked) {
+        StringBuilder b = new StringBuilder()
+        if (!dropped.isEmpty())
+            b.append("  Dropped: ").append(dropped).append("\n")
+        if (!created.isEmpty())
+            b.append("  Created: ").append(created).append("\n")
+        if (!deletedRoots.isEmpty()) {
+            b.append("  Root deletions:\n")
+            for (Map.Entry<String, List<String>> e : deletedRoots.entrySet())
+                b.append("    ").append(e.key).append(": ").append(e.value).append("\n")
+        }
+        if (rootAdds != null && !rootAdds.isEmpty()) {
+            b.append("  New roots to index:\n")
+            for (Map.Entry<String, List<String>> e : rootAdds.entrySet())
+                for (String path : e.value)
+                    b.append("    ").append(e.key).append(" : ").append(path).append("\n")
+        }
+        if (blocked != null && !blocked.isEmpty()) {
+            b.append("  Skipped (sweep in progress or error):\n")
+            for (String s : blocked)
+                b.append("    - ").append(s).append("\n")
+        }
+        return b.toString()
+    }
+
     // ---- helpers ----
 
     private static JSONObject projectStatus(Connection db, String project) {

@@ -47,6 +47,18 @@ class ProjectBootstrap {
         return needsScan
     }
 
+    /**
+     * Bootstrap a single project's schema + tables on demand (used by the
+     * scan reconciler when rag-projects.json gains a new project entry).
+     * Idempotent; safe to re-run.
+     */
+    static void ensureOne(Connection db, String project) {
+        if (!ProjectRegistry.isValidName(project))
+            throw new RuntimeException("Invalid project name '${project}'")
+        ensureSchema(db, project)
+        db.commit()
+    }
+
     private static void ensureSchema(Connection db, String project) {
         db.execute("CREATE SCHEMA IF NOT EXISTS ${project}".toString())
 

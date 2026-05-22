@@ -29,6 +29,7 @@ class KissInit {
         MainServlet.allowWithoutAuthentication("services.RAGAdmin", "status")
         MainServlet.allowWithoutAuthentication("services.RAGAdmin", "reindex")
         MainServlet.allowWithoutAuthentication("services.RAGAdmin", "listProjects")
+        MainServlet.allowWithoutAuthentication("services.RAGAdmin", "reconcile")
 
         // The Kiss default root logger is at ERROR — bump our RAG namespaces
         // to INFO so sweep-start/done lines, queued requests, and other

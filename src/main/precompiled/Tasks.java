@@ -79,12 +79,28 @@ public class Tasks {
      */
     public static void main(String[] args) throws Exception {
         args = consumePortOptions(args);
+        args = consumeYesFlag(args);
         args = consumeScanArg(args);
         BuildUtils.build(args, Tasks.class, LIBS);
     }
 
     /** Argument captured by {@code scan <project|all>} on the command line. */
     static String scanTarget = null;
+
+    /** Set by {@code -y} / {@code --yes} — suppress the confirmation prompt before destructive reconcile actions. */
+    static boolean assumeYes = false;
+
+    /** Strip {@code -y} / {@code --yes} from argv and set {@link #assumeYes}. */
+    private static String[] consumeYesFlag(String[] args) {
+        java.util.List<String> out = new java.util.ArrayList<>(args.length);
+        for (String a : args) {
+            if ("-y".equals(a) || "--yes".equals(a))
+                assumeYes = true;
+            else
+                out.add(a);
+        }
+        return out.toArray(new String[0]);
+    }
 
     /**
      * Pull the positional argument immediately after the {@code scan}
@@ -215,6 +231,7 @@ public class Tasks {
         println("  -dp PORT, --debug-port=PORT       JDWP debug port (default 17900)");
         println("  -hp PORT, --http-port=PORT        Tomcat HTTP port (default 17080)");
         println("  -sp PORT, --shutdown-port=PORT    Tomcat shutdown port (default 17005)");
+        println("  -y, --yes                         skip the scan reconcile confirmation prompt");
         println("");
     }
 
@@ -482,26 +499,176 @@ public class Tasks {
             System.err.println("Server is not running on port " + httpP + ". Start it with './bld start' first.");
             return;
         }
+        String baseUrl = "http://127.0.0.1:" + httpP + "/rest";
 
+        // Reconcile DB state with rag-projects.json BEFORE scanning, so a newly
+        // added project gets a schema, a removed project is dropped, and roots
+        // added/removed since the last scan are surfaced. Reconciliation may
+        // expand the scan target list (new projects, projects with new roots).
+        java.util.List<String> reconcileAdds = reconcileBeforeScan(baseUrl);
+        if (reconcileAdds == null)
+            return;  // aborted (user said no, or fatal error already reported)
+
+        // After reconcile, rag-projects.json is the source of truth.
         java.util.List<String> known = readProjectNames("src/main/backend/rag-projects.json");
-        java.util.List<String> targets;
+        java.util.LinkedHashSet<String> targets = new java.util.LinkedHashSet<>();
         if ("all".equalsIgnoreCase(scanTarget)) {
             if (known.isEmpty()) {
                 System.err.println("No projects found in src/main/backend/rag-projects.json");
                 return;
             }
-            targets = known;
+            targets.addAll(known);
         } else {
             if (!known.isEmpty() && !known.contains(scanTarget))
                 System.err.println("warning: '" + scanTarget + "' is not in rag-projects.json (known: " + known + ")");
-            targets = java.util.Collections.singletonList(scanTarget);
+            targets.add(scanTarget);
+            // New projects + projects that gained roots must be scanned even
+            // when the user named just one specific project.
+            targets.addAll(reconcileAdds);
         }
 
-        String baseUrl = "http://127.0.0.1:" + httpP + "/rest";
         for (String p : targets) {
             scanOne(baseUrl, p);
         }
         println("");
+    }
+
+    /**
+     * Phase 1 of {@link #scan()}: ask the server to compute a reconcile plan,
+     * print it, prompt the user if it includes destructive operations (drops
+     * or root deletes), then execute it. Returns the union of newly-created
+     * projects and projects with newly-added roots so the scan target list
+     * can be extended to include them. Returns {@code null} if the user
+     * declined or a fatal error occurred (caller should abort the scan).
+     */
+    private static java.util.List<String> reconcileBeforeScan(String baseUrl) {
+        String planBody = "{\"_method\":\"reconcile\",\"_class\":\"services/RAGAdmin\",\"dryRun\":true}";
+        String planResp = httpPostJson(baseUrl, planBody, 60_000);
+        if (planResp.startsWith("error:")) {
+            System.err.println("reconcile (dry-run) failed: " + planResp);
+            return null;
+        }
+        String err = extractJsonString(planResp, "error");
+        if (err != null) {
+            System.err.println("reconcile: " + err);
+            return null;
+        }
+
+        String plan = unescapeJsonString(extractJsonString(planResp, "humanPlan"));
+        boolean requiresConfirm = planResp.contains("\"requiresConfirm\":true")
+                              || planResp.contains("\"requiresConfirm\": true");
+        java.util.List<String> creates    = extractJsonStringArray(planResp, "createsNames");
+        java.util.List<String> rootAddPrj = extractJsonStringArray(planResp, "rootAddsProjects");
+        java.util.LinkedHashSet<String> additions = new java.util.LinkedHashSet<>();
+        additions.addAll(creates);
+        additions.addAll(rootAddPrj);
+
+        boolean anything = (plan != null && !plan.isEmpty());
+        if (!anything)
+            return new java.util.ArrayList<>(additions);  // nothing to reconcile, no additions
+
+        println("");
+        println("Reconcile plan (DB vs rag-projects.json):");
+        println(plan);
+
+        if (requiresConfirm && !assumeYes) {
+            print("Proceed with reconciliation? [y/N] ");
+            String ans = readLineFromStdin();
+            if (ans == null || !ans.trim().toLowerCase().startsWith("y")) {
+                println("Reconciliation declined; skipping scan.");
+                return null;
+            }
+        }
+
+        String execBody = "{\"_method\":\"reconcile\",\"_class\":\"services/RAGAdmin\",\"dryRun\":false}";
+        String execResp = httpPostJson(baseUrl, execBody, 300_000);
+        if (execResp.startsWith("error:")) {
+            System.err.println("reconcile (execute) failed: " + execResp);
+            return null;
+        }
+        String err2 = extractJsonString(execResp, "error");
+        if (err2 != null) {
+            System.err.println("reconcile: " + err2);
+            return null;
+        }
+        String summary = unescapeJsonString(extractJsonString(execResp, "humanPlan"));
+        if (summary != null && !summary.isEmpty()) {
+            println("Reconciliation done:");
+            println(summary);
+        }
+        // Use the executed response's list — names actually created may
+        // differ from the dry-run plan if anything was blocked.
+        java.util.List<String> createsDone   = extractJsonStringArray(execResp, "createsNames");
+        java.util.List<String> rootAddsAfter = extractJsonStringArray(execResp, "rootAddsProjects");
+        java.util.LinkedHashSet<String> after = new java.util.LinkedHashSet<>();
+        after.addAll(createsDone);
+        after.addAll(rootAddsAfter);
+        return new java.util.ArrayList<>(after);
+    }
+
+    /** Read one line from stdin; returns null on EOF or read error. */
+    private static String readLineFromStdin() {
+        try {
+            return new java.io.BufferedReader(new java.io.InputStreamReader(System.in)).readLine();
+        } catch (java.io.IOException e) {
+            return null;
+        }
+    }
+
+    /** print() without a trailing newline (BuildUtils.println always adds one). */
+    private static void print(String s) {
+        System.out.print(s);
+        System.out.flush();
+    }
+
+    /** Reverse the standard JSON string escapes used in humanPlan; handles backslash-u escapes too. */
+    private static String unescapeJsonString(String s) {
+        if (s == null)
+            return null;
+        StringBuilder b = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '\\' && i + 1 < s.length()) {
+                char n = s.charAt(++i);
+                switch (n) {
+                    case 'n':  b.append('\n'); break;
+                    case 't':  b.append('\t'); break;
+                    case 'r':  b.append('\r'); break;
+                    case '"':  b.append('"');  break;
+                    case '\\': b.append('\\'); break;
+                    case '/':  b.append('/');  break;
+                    case 'u':
+                        if (i + 4 < s.length()) {
+                            try {
+                                b.append((char) Integer.parseInt(s.substring(i + 1, i + 5), 16));
+                                i += 4;
+                            } catch (NumberFormatException nfe) {
+                                b.append('\\').append('u');
+                            }
+                        } else {
+                            b.append('\\').append('u');
+                        }
+                        break;
+                    default:   b.append('\\').append(n); break;
+                }
+            } else {
+                b.append(c);
+            }
+        }
+        return b.toString();
+    }
+
+    /** Extract a flat JSON array of strings by key name. Returns empty list if absent. */
+    private static java.util.List<String> extractJsonStringArray(String json, String key) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                "\"" + java.util.regex.Pattern.quote(key) + "\"\\s*:\\s*\\[([^\\]]*)\\]").matcher(json);
+        if (!m.find())
+            return out;
+        java.util.regex.Matcher sm = java.util.regex.Pattern.compile("\"((?:\\\\\"|[^\"])*)\"").matcher(m.group(1));
+        while (sm.find())
+            out.add(unescapeJsonString(sm.group(1)));
+        return out;
     }
 
     /** Reindex one project synchronously, printing progress as files/chunks accumulate. */
@@ -569,15 +736,20 @@ public class Tasks {
         return m.find() ? m.group(1) : null;
     }
 
-    /** Issue a JSON POST and return the response body (or "error: ..." on failure). */
+    /** Issue a JSON POST with the default 15s read timeout. */
     private static String httpPostJson(String url, String body) {
+        return httpPostJson(url, body, 15000);
+    }
+
+    /** Issue a JSON POST and return the response body (or "error: ..." on failure). */
+    private static String httpPostJson(String url, String body, int readTimeoutMs) {
         try {
             java.net.HttpURLConnection conn = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setDoOutput(true);
             conn.setConnectTimeout(2000);
-            conn.setReadTimeout(15000);
+            conn.setReadTimeout(readTimeoutMs);
             try (java.io.OutputStream os = conn.getOutputStream()) {
                 os.write(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             }

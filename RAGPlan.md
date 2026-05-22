@@ -254,8 +254,9 @@ lock row in `rag_meta`:
 |---|---|---|
 | Startup auto-scan (per project) | `KissInit.init2` → `ProjectBootstrap.ensureAll` | Once per project whose `rag_file` is empty at server start (i.e. new project or wiped index) |
 | Cron sweep | `CronTasks/RAGSweep.groovy`, controlled by `CronTasks/crontab` | Every 10 minutes (`*/10 * * * * RAGSweep`); comment out to disable |
-| `./bld scan <project\|all>` | `Tasks.scan` → POSTs `RAGAdmin.reindex` and polls `RAGAdmin.status` | Foreground, with per-second progress to the terminal |
+| `./bld scan <project\|all>` | `Tasks.scan` → POSTs `RAGAdmin.reconcile` (dry-run + execute) then `RAGAdmin.reindex` and polls `RAGAdmin.status` | Foreground, with per-second progress to the terminal. Reconcile runs first; new projects and projects with new roots are added to the scan list. |
 | JSON-RPC `RAGAdmin.reindex` (fire and forget) | `services/RAGAdmin.reindex` | When called by curl, scripts, or `bld scan` itself |
+| JSON-RPC `RAGAdmin.reconcile` | `services/RAGAdmin.reconcile` | Reconciles DB state with `rag-projects.json`: drops removed-project schemas (CASCADE), creates new ones, deletes `rag_file` rows whose `repo` is no longer a configured root. `dryRun=true` returns the plan only; `dryRun=false` executes. Acquires the per-project lock before mutating; a project mid-sweep is skipped with a "blocked" marker. |
 
 The startup auto-scan runs in a daemon thread spawned by
 `KissInit.init2` *after* `ProjectBootstrap.ensureAll` reports which
@@ -543,9 +544,13 @@ plus, optionally, a new symbol-pattern regex in
 - Cross-project search. By design.
 - Per-project secrets / per-project auth. Single shared secret is
   enough for single-user local use.
-- Automatic dropping of a project's schema when you remove it from
-  `rag-projects.json`. Manual `DROP SCHEMA … CASCADE` only — a typo
-  in the config must not destroy data.
+- Unattended dropping of a project's schema when you remove it from
+  `rag-projects.json`. `./bld scan` reconciles and *does* drop, but
+  it prints the plan and prompts `Proceed? [y/N]` first for any drop;
+  `-y` skips the prompt for scripted use. The prompt covers schema
+  drops only — root-deletes are not prompted, because the cron sweep
+  already reaps orphan files on its own schedule and a prompt here
+  would not actually protect data.
 - Cloud-hosted embeddings. Deliberately local-only.
 - A second LLM for generation. The local LLM is for embeddings;
   generation is the cloud model that Claude Code already calls.
