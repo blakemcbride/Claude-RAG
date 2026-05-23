@@ -91,6 +91,20 @@ with a note (so `new-project my-proj` is accepted and stored as
 → Claude Code is updated; `codex` on `$PATH` or `~/.codex/config.toml`
 exists → Codex is updated; neither → silent skip.
 
+**Claude Code uses project scope.** `bld new-project`, `add-root`,
+`remove-root`, `remove-project`, and `bld start` invoke
+`claude mcp add -s project` from each configured root, writing one
+`.mcp.json` per root. Project-scope entries are only visible to
+Claude Code sessions launched from somewhere under that root, which
+is the deliberate design: Claude Code in unrelated directories no
+longer triggers Ollama embeddings via speculative `search_code`
+calls. `bld start` always re-asserts every project's entries, which
+also migrates legacy `--scope user` entries written by pre-2026
+releases. Codex has no project-scope concept — its
+`[mcp_servers.<name>]` sections in `~/.codex/config.toml` are global
+and Code-RAG writes them that way (the speculative-query problem
+still exists for Codex; tracked as a follow-up).
+
 `./bld scan` always reconciles DB state with `rag-projects.json` before
 scanning: creates schemas for new projects, drops schemas for removed
 projects (CASCADE), deletes `rag_file` rows whose `repo` is no longer a

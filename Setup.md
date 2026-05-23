@@ -387,11 +387,21 @@ Each `*-project` / `*-root` command edits
 `$CODE_RAG_HOME/src/main/backend/rag-projects.json`, syncs the live
 copies under `work/exploded/.../backend/` and
 `tomcat/webapps/ROOT/.../backend/`, then runs `bld scan` so the
-reconcile step takes effect immediately. `new-project` and
-`remove-project` additionally maintain `~/.claude.json` (via
-`claude mcp add` / `remove`) and `~/.codex/config.toml` (direct
-section edit) for whichever clients are installed; if a client isn't
-installed, that registration is silently skipped.
+reconcile step takes effect immediately. `new-project`, `remove-project`,
+`add-root`, and `remove-root` additionally maintain MCP client config
+for whichever clients are installed:
+- **Claude Code** — writes a `.mcp.json` at *project scope* in each
+  configured root (via `claude mcp add -s project`). The entry is only
+  visible to Claude Code sessions launched from somewhere under that
+  root, so Claude Code working in unrelated directories no longer
+  speculatively queries this project's index. `bld start` also
+  re-asserts every project's MCP entries on each restart, which
+  migrates any legacy user-scope registrations from older releases.
+- **OpenAI Codex CLI** — appends/edits `[mcp_servers.<name>]` in
+  `~/.codex/config.toml` (Codex has no project-scope concept; entries
+  are global by design).
+
+If a client isn't installed, that registration is silently skipped.
 
 Project names must match `[a-z][a-z0-9_]*` (they become PostgreSQL
 schema names). Dashes are auto-rewritten to underscores with a

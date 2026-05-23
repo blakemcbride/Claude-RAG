@@ -158,6 +158,16 @@ trusted project directory. If you want a particular checkout to use the
 RAG and nothing else, that's the cleaner place to put the entry.
 Otherwise, `~/.codex/config.toml` registers the server globally.
 
+> **Caveat (Ollama load):** because Codex's global entries are visible
+> from every directory, Codex sessions in unrelated cwds may still
+> speculatively call `search_code_<project>`, embedding the query
+> through Ollama for nothing. Claude Code avoids this by registering
+> at *project scope* (see [ClaudeCode.md](ClaudeCode.md)); Codex has
+> no equivalent for the default `bld new-project` flow. If you find
+> the Ollama spikes meaningful, the per-project
+> `.codex/config.toml` + trusted-directory mechanism above is the
+> manual workaround.
+
 ## 4. Verify
 
 Restart any open Codex session so it re-reads the config, then run a

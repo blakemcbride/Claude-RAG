@@ -183,19 +183,30 @@ Codex *inside WSL2* (that's `code-rag new-project`'s job). You now do
 the same registration on the Windows side, pointing at the same URL
 but with two extra headers.
 
-**Claude Code (PowerShell, native Windows install):**
+**Claude Code (PowerShell, native Windows install):** run from inside
+the Windows-side checkout of the project you indexed (so the
+`.mcp.json` lands in the right tree):
 
 ```powershell
 $secret = "PASTE-RAGMCPSharedSecret-HERE"
-claude mcp add --transport http --scope user myproj `
+cd C:\path\to\my\project_root
+claude mcp add --transport http -s project myproj `
     http://127.0.0.1:17080/rag-mcp/myproj `
     --header "X-RAG-Token: $secret" `
     --header "X-Path-Style: windows"
 ```
 
-Verify:
+`-s project` writes the entry into `.\.mcp.json` so it's visible to
+Claude Code sessions launched from anywhere under this tree — and
+invisible elsewhere, which is the behavior you want. If you'd rather
+have the entry visible from every Windows directory, swap
+`-s project` for `-s user` (and accept the trade-off documented in
+[ClaudeCode.md](ClaudeCode.md)).
+
+Verify from inside the same tree:
 
 ```powershell
+cd C:\path\to\my\project_root
 claude mcp list
 # myproj: http://127.0.0.1:17080/rag-mcp/myproj (HTTP) - ✓ Connected
 ```
@@ -260,10 +271,13 @@ configs. After each `new-project`, repeat step 4 above for the new
 project name on the Windows side.
 
 `code-rag remove-project foo` similarly only deregisters on the WSL2
-side. Remove the Windows-side entry manually:
+side. Remove the Windows-side entry manually (from inside the
+project root for Claude Code, since project-scope removals are
+cwd-sensitive):
 
 ```powershell
-claude mcp remove myproj
+cd C:\path\to\my\project_root
+claude mcp remove myproj -s project
 # or edit %USERPROFILE%\.codex\config.toml and delete the section
 ```
 

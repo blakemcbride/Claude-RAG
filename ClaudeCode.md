@@ -22,69 +22,72 @@ confusion is mixing up their roles, so:
 | File | What it does | Who edits it | When you touch it |
 |---|---|---|---|
 | `src/main/backend/rag-projects.json` | Tells the Code-RAG **server** which code trees to index. One JSON entry per project: `name`, absolute `roots[]`, optional `excludeGlobs`. Gitignored — the committed `.example` is just a template. | You (hand-edit). | When adding/removing a project or changing its roots. Restart Kiss after editing so the new schema gets bootstrapped. |
-| `~/.claude.json` | Tells **Claude Code** which MCP servers exist for which working directory. Holds your *entire* Claude Code state (every project's settings + MCP entries), not just Code-RAG. | The `claude` CLI (`claude mcp add` / `remove` / `list`). Don't hand-edit unless you have to. | When registering this Code-RAG instance with a new Claude Code project, or when the shared secret rotates. |
+| `<project_root>/.mcp.json` | Tells **Claude Code** which MCP servers are available when launched from this project's tree. One file per project root listed in `rag-projects.json` — Code-RAG writes them automatically. | `bld` (via `claude mcp add -s project`). Don't hand-edit unless you have to. | Maintained automatically by `bld new-project`, `add-root`, `remove-root`, `remove-project`, and `bld start`. |
 
 The two files don't communicate directly. The **bridge is the URL**: in
-`~/.claude.json` you add an MCP entry with URL
+each `.mcp.json` you have an MCP entry with URL
 `http://127.0.0.1:17080/rag-mcp/<X>`, and `<X>` must equal a `name` in
 `rag-projects.json`. If they don't match the server replies 404 when
 Claude Code tries to call a tool.
 
 Worth being precise about one subtlety: the MCP **entry name** in
-`~/.claude.json` (the key under `mcpServers`) is just Claude Code's
-local label — it becomes the `mcp__<name>__…` tool prefix Claude Code
+`.mcp.json` (the key under `mcpServers`) is just Claude Code's local
+label — it becomes the `mcp__<name>__…` tool prefix Claude Code
 exposes. The server, on the other hand, routes on the URL **path
 segment** after `/rag-mcp/`. We use the same string for both by
-convention — usually the `name` from `rag-projects.json` — so all three
+convention — always the `name` from `rag-projects.json` — so all three
 agree, but they are technically independent variables. The thing the
 server actually requires to match is the URL path segment.
 
 `rag-projects.json` is documented end-to-end in [Setup.md §3](Setup.md)
-and [Running.md §4](Running.md). `~/.claude.json` is Claude Code's own
-file — its schema and behavior live with [Claude Code's
-documentation](https://docs.claude.com/en/docs/claude-code/overview).
+and [Running.md §4](Running.md). `.mcp.json` is Claude Code's standard
+project-scope config — its schema and behavior live with [Claude
+Code's documentation](https://docs.claude.com/en/docs/claude-code/overview).
+
+> ⚠️ `.mcp.json` contains the `X-RAG-Token` shared secret. It lives at
+> the top of each project root, where it's easy to accidentally commit.
+> The secret only authenticates loopback requests to your local
+> Code-RAG instance — so leaking it is low-severity — but if the
+> project is in git, add `.mcp.json` to its `.gitignore` to keep the
+> secret out of history. Code-RAG cannot edit `.gitignore` files in
+> projects it doesn't own.
 
 ## Working directory and visible MCP entries
 
-Claude Code identifies its "current project" by **the absolute working
-directory `claude` was launched from**. There is no separate project
-flag — `pwd` *is* the identity. Inside `~/.claude.json` your MCP entries
-live under that path as a key:
+Claude Code looks for `.mcp.json` starting at the cwd it was launched
+from and walking up to the nearest enclosing git root. So an entry
+written under a project root is visible to every Claude Code session
+launched from anywhere under that tree, and **invisible** to sessions
+launched from unrelated directories.
 
-```text
-projects:
-    /home/you/Stack360/Code-RAG:
-        mcpServers:
-            myproj:
-                url:     "http://127.0.0.1:17080/rag-mcp/myproj"
-                headers: { "X-RAG-Token": "..." }
-    /home/you/somewhere-else:
-        mcpServers: { ... }
-```
+This is by design. Old versions of Code-RAG registered at
+`--scope user`, which put one entry in `~/.claude.json` visible from
+*every* directory. That meant Claude Code in an unrelated directory
+would still speculatively call `mcp__<project>__search_code`, which
+embedded the query through Ollama for nothing. With project-scope
+registration that whole class of wasted work goes away.
 
-The default `--scope local` (which is what plain `claude mcp add` uses)
-writes the entry under the cwd you ran the command in. Practical
-consequences:
+Practical consequences:
 
-- **Register from the directory you'll launch `claude` from.** Running
-  `claude mcp add` from `/home/you/Stack360/Code-RAG` puts the entry
-  under that key; launching `claude` from somewhere else will not show
-  the `myproj` server.
-- **`claude mcp list` is cwd-sensitive.** A blank list usually means
-  you registered from a different directory.
-- **Renaming or moving the working tree invalidates the entry.** The
-  old project key no longer matches your new cwd. Re-run
-  `claude mcp add` from the new path (or edit the key in
-  `~/.claude.json` by hand).
-- **`--scope user` makes an entry visible from any directory.** Useful
-  if you want a single Code-RAG registration that works no matter
-  where you launch `claude`. The trade-off: every Claude Code session
-  on the machine sees that MCP entry, whether the project is relevant
-  to the work or not.
-- **`--scope project` writes a committable `.mcp.json` inside the
-  project tree.** Visible from anywhere inside that tree. We don't
-  recommend it for Code-RAG because the shared secret would end up in
-  the file (and possibly in git).
+- **One `.mcp.json` per configured root.** A Code-RAG project can have
+  multiple roots (`bld new-project foo /a /b /c`); each gets its own
+  `.mcp.json` with identical contents. Claude Code launched in any of
+  them sees the tools.
+- **Subdirectories of a root work too.** Claude Code walks upward from
+  cwd to find `.mcp.json`, so launching from `/a/src/feature` finds
+  `/a/.mcp.json` just fine.
+- **`claude mcp list` is cwd-sensitive.** A blank list means the
+  current cwd is not inside any registered root.
+- **Moving a root invalidates the entry.** The `.mcp.json` moves with
+  the tree, so most relocations Just Work — but `rag-projects.json`
+  still points at the old absolute path. Update it with
+  `bld remove-root` + `bld add-root` and the new `.mcp.json` will be
+  written automatically.
+- **Legacy user-scope entries are migrated on `bld start`.** If you
+  installed Code-RAG before this change and have entries under
+  `~/.claude.json`'s top-level `mcpServers`, the next `bld start` will
+  remove them and write project-scope `.mcp.json` files in each root.
+  Idempotent — safe to re-run.
 
 ## 0. Prerequisites
 
@@ -99,33 +102,39 @@ consequences:
 
 ## 1. Register the MCP server
 
-> **Shortcut:** if you've installed the `code-rag` wrapper (Setup.md §10),
-> `code-rag new-project <name> <root>...` adds the project to
-> `rag-projects.json`, scans it, AND registers the MCP entry with both
-> Claude Code (via `claude mcp add --scope user`) and Codex (TOML
-> section) automatically. The manual procedure below is what that
-> shortcut runs under the hood; read it to understand the wiring or
-> when registering a project you didn't create via `code-rag`.
+> **The common path is automatic — you do not run any `claude mcp`
+> command by hand.** `bld new-project <name> <root>...` (or
+> `code-rag new-project ...` if you've installed the wrapper) adds the
+> project to `rag-projects.json`, scans it, and writes a `.mcp.json`
+> with the MCP entry at *project scope* in each root. `bld add-root`,
+> `bld remove-root`, `bld remove-project`, and `bld start` all keep
+> those `.mcp.json` files in sync. Read the manual procedure below
+> only if you need to understand the wiring, or if you're registering
+> a project that already exists in `rag-projects.json` but never had a
+> `.mcp.json` written.
 
-Claude Code stores MCP registrations in `~/.claude.json`. The
-single-command form using the CLI:
+The manual form, run **from inside the project root**:
 
 ```bash
-SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
+SECRET=$(grep '^RAGMCPSharedSecret' $CODE_RAG_HOME/src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
 
-claude mcp add --transport http myproj \
+cd /path/to/my/project_root
+claude mcp add --transport http -s project myproj \
     http://127.0.0.1:17080/rag-mcp/myproj \
     --header "X-RAG-Token: $SECRET"
 ```
 
-Substitute `myproj` with the project's `name` from `rag-projects.json`
-(it must match exactly — that segment is how the server routes the
-request). The `--header` flag is how Claude Code sends the shared
-secret on every request.
+`-s project` is the load-bearing flag — it writes the entry to
+`./.mcp.json` rather than `~/.claude.json`. Substitute `myproj` with
+the project's `name` from `rag-projects.json` (it must match exactly —
+that segment is how the server routes the request). If the project
+has multiple roots, repeat the command (with the same arguments) from
+each root.
 
-Verify the registration:
+Verify the registration from somewhere inside the project tree:
 
 ```bash
+cd /path/to/my/project_root
 claude mcp list
 ```
 
@@ -135,45 +144,43 @@ You should see a row like:
 myproj: http://127.0.0.1:17080/rag-mcp/myproj (HTTP) - ✓ Connected
 ```
 
+Running the same `claude mcp list` from outside the project tree will
+*not* show the entry — that's the whole point of project scope.
+
 ## 2. One entry per project
 
 The URL path segment (`/rag-mcp/<project>`) scopes the search to one
 project's index. If you have more than one project configured in
-`rag-projects.json`, register each one as its own MCP entry — they
-become independent tool prefixes in Claude Code:
+`rag-projects.json`, each gets its own `.mcp.json` inside its own
+root — registered separately and visible only from inside its own
+tree. They become independent tool prefixes in Claude Code
+(`mcp__stack360__search_code`, `mcp__other_project__search_code`,
+etc.).
 
-```bash
-SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
-
-claude mcp add --transport http stack360 \
-    http://127.0.0.1:17080/rag-mcp/stack360 \
-    --header "X-RAG-Token: $SECRET"
-
-claude mcp add --transport http other_project \
-    http://127.0.0.1:17080/rag-mcp/other_project \
-    --header "X-RAG-Token: $SECRET"
-```
-
-The MCP entry name (the first positional argument — `stack360`,
-`other_project`) is also the prefix Claude Code uses for the tools
-(`mcp__stack360__search_code`, etc.). Pick whatever's convenient; the
-URL path segment is the part that must match the project's `name`.
+The MCP entry name (the first positional argument to `claude mcp add`)
+is also the prefix Claude Code uses for the tools. By convention
+Code-RAG always uses the project's `name` from `rag-projects.json`,
+so the URL path segment, MCP entry name, and tool prefix all agree.
 
 ## 3. Rotating the shared secret
 
 If you change `RAGMCPSharedSecret` in `application.ini`, restart Kiss
-and re-run `claude mcp add` with the new secret. The command replaces
-the existing entry under the same name; you do not need to remove it
-first.
+(`bld stop && bld start`) — the `bld start` step re-runs registration
+for every project, rewriting each `.mcp.json` with the new secret.
+You don't need to run any `claude mcp` command manually.
+
+If for any reason you need to remove an entry by hand (e.g. you're
+renaming a project), run from inside the project root:
 
 ```bash
-claude mcp remove myproj    # only needed if renaming the entry
+claude mcp remove myproj -s project    # only needed if renaming the entry
 ```
 
 ## 4. Verify
 
-Start a Claude Code session inside the project's working tree, enable
-the matching MCP server for that session, then try a prompt:
+Start a Claude Code session **inside the project's working tree**
+(i.e. from somewhere at or below the root listed in
+`rag-projects.json`), then try a prompt:
 
 > *"Use `mcp__myproj__search_code` to find where login is handled."*
 
@@ -184,9 +191,18 @@ absolute path and line range.
 
 If Claude can't see the `mcp__myproj__*` tools, check:
 
-1. The server is reachable. From the same shell:
+1. **You launched `claude` from inside the project tree.** Project-scope
+   entries are invisible to sessions started from anywhere else. If
+   `cd /path/to/project_root && claude mcp list` shows the entry but
+   `cd /tmp && claude mcp list` doesn't, that's working as intended.
+2. **The `.mcp.json` actually exists.** Run `ls /path/to/project_root/.mcp.json`.
+   If it's missing, `bld start` should recreate it on the next restart;
+   you can also re-run `bld new-project` (it refuses if the project
+   already exists, but the error tells you to use `add-root` — which
+   does re-register).
+3. **The server is reachable.** From the same shell:
    ```bash
-   SECRET=$(grep '^RAGMCPSharedSecret' src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
+   SECRET=$(grep '^RAGMCPSharedSecret' $CODE_RAG_HOME/src/main/backend/application.ini | sed 's/.*=\s*//' | tr -d ' ')
    curl -s -X POST http://127.0.0.1:17080/rag-mcp/myproj \
        -H "X-RAG-Token: $SECRET" \
        -H 'Content-Type: application/json' \
@@ -196,9 +212,7 @@ If Claude can't see the `mcp__myproj__*` tools, check:
    `list_repos`, `index_status`), the server is healthy and the
    problem is on the Claude Code side. If it doesn't, the server isn't
    running or the secret is wrong — see [Running.md](Running.md).
-2. The registration is visible: `claude mcp list` should show your
-   entry with `✓ Connected`.
-3. You restarted the Claude Code session after registering. MCP
+4. **You restarted the Claude Code session after registering.** MCP
    servers connect at session start; an already-open session won't
    pick up a newly-added one.
 
@@ -208,6 +222,23 @@ If Claude can't see the `mcp__myproj__*` tools, check:
 `mcp__<entry-name>__<tool-name>`. So with the registration above the
 tools are `mcp__myproj__search_code`, `mcp__myproj__get_chunk`,
 `mcp__myproj__list_repos`, `mcp__myproj__index_status`.
+
+**Project scope means no ad-hoc cross-project search.** If you launch
+Claude Code from `~`, `/tmp`, or any directory not under one of the
+configured roots, you won't see *any* `mcp__<project>__*` tools — even
+if Code-RAG is running. That's the deliberate trade-off the project
+scope makes: the local LLM doesn't get hit by speculative searches
+when you're working on unrelated code, but you have to `cd` into the
+project to use Code-RAG. If you need cross-project search from
+arbitrary cwds, you can hand-add a user-scope entry
+(`claude mcp add --transport http -s user ...`), but be aware
+`bld start` will remove it again as part of the legacy-migration
+sweep.
+
+**The shared secret lives in each `.mcp.json`.** The file sits at the
+top of the project root. Add `.mcp.json` to that project's
+`.gitignore` if the project is checked into git — Code-RAG cannot do
+that for you.
 
 **Multiple agents at once is fine.** Both Claude Code and Codex (or
 two Claude Code sessions) can register against the same Code-RAG

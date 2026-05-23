@@ -99,11 +99,15 @@ task — the wrapper just lets you invoke them from any cwd.
 > terminal session has it.
 
 The `*-project` and `*-root` commands edit `rag-projects.json`, sync
-the runtime copies, run reconcile + scan, and (for `new-project` /
-`remove-project`) maintain the MCP entries in `~/.claude.json` and
-`~/.codex/config.toml` for whichever clients are detected (claude /
-codex on `$PATH`, or an existing codex config). Skipping a client is
-silent — no error if you only have one installed.
+the runtime copies, run reconcile + scan, and maintain MCP entries
+for whichever clients are detected (claude / codex on `$PATH`, or an
+existing codex config). For Claude Code this means a `.mcp.json` at
+**project scope** in each configured root (one per root); for Codex
+it means an `[mcp_servers.<name>]` section in `~/.codex/config.toml`
+(global — Codex has no project scope). `bld start` re-asserts both on
+every restart, which also migrates any legacy user-scope Claude Code
+entries from older Code-RAG installs. Skipping a client is silent —
+no error if you only have one installed.
 
 The rest of this document uses `./bld ...` so it works without the
 wrapper; substitute `code-rag ...` whenever you prefer.
@@ -195,8 +199,12 @@ client you use:
 - **Claude Code** — see [ClaudeCode.md](ClaudeCode.md).
 - **OpenAI Codex CLI** — see [Codex.md](Codex.md).
 
-If you rotate the shared secret in `application.ini`, restart Kiss and
-re-register the MCP entry in whichever client(s) you use.
+If you rotate the shared secret in `application.ini`, restart Kiss
+(`./bld stop && ./bld start`) — the `bld start` step automatically
+rewrites every `.mcp.json` (Claude Code) and the
+`[mcp_servers.<name>]` section in `~/.codex/config.toml` (Codex) with
+the new secret, so you don't need to run any client-side command by
+hand.
 
 ---
 
@@ -405,7 +413,12 @@ Check `catalina.out`; the compile error is logged just above. The cron
 retries each minute, so just fix the source and the next firing will succeed.
 
 **Claude Code does not see the `mcp__rag-*__*` tools.**
-- Verify the MCP server is registered: `claude mcp list`
+- **Verify you launched `claude` from inside a registered project root.**
+  Project-scope `.mcp.json` files are only visible to Claude Code
+  sessions started from somewhere under that root — see [ClaudeCode.md](ClaudeCode.md).
+  `cd /path/to/project_root && claude mcp list` is the test that matters.
+- Verify the `.mcp.json` exists at the root: `ls /path/to/project_root/.mcp.json`.
+  If it's missing, `bld start` will recreate it on the next restart.
 - Verify Kiss is up: `curl http://localhost:17080/rag-mcp/<project> -X POST -H "X-RAG-Token: <token>" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'`
 - Restart the Claude Code session (MCP servers are connected at session start).
 

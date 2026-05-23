@@ -505,10 +505,53 @@ public class Tasks {
             runWait(true, "tomcat\\bin\\debug.cmd");
         else
             runWait(true, "tomcat/bin/debug");
+        reassertMcpEntries();
         println("***** SERVER IS RUNNING *****");
         println("Server log can be viewed at " + cwd() + "/tomcat/logs/catalina.out or via the view-log command");
         println("The app can also be debugged at port " + debugPort);
         println("To stop the backend, type 'bld stop'");
+    }
+
+    /**
+     * On every {@code bld start}, walk rag-projects.json and re-assert
+     * each project's MCP entries with installed clients. Two things this
+     * accomplishes:
+     * <ol>
+     *   <li><b>Migration from legacy user-scope registration.</b> Older
+     *       releases wrote Claude Code entries at {@code --scope user},
+     *       so every Claude Code session everywhere saw every project's
+     *       tools. {@link #registerClaudeEntry} sweeps any user/local
+     *       scope entry for the project name before adding the new
+     *       project-scope {@code .mcp.json} in each root, which migrates
+     *       existing installs in place.</li>
+     *   <li><b>Self-repair after manual edits.</b> If the user has
+     *       deleted a {@code .mcp.json} by hand or moved a project root,
+     *       restarting the server re-creates the registration.</li>
+     * </ol>
+     * Idempotent — if everything is already in the right shape, nothing
+     * visible happens. Silently skipped when neither {@code claude} nor
+     * {@code codex} is installed.
+     */
+    private static void reassertMcpEntries() {
+        boolean hasClaude = isOnPath("claude");
+        boolean hasCodex  = isOnPath("codex")
+                || new java.io.File(codexConfigPath()).exists();
+        if (!hasClaude && !hasCodex)
+            return;
+        JSONObject cfg = loadProjectsJson();
+        if (cfg == null)
+            return;
+        JSONArray projects = cfg.getJSONArray("projects");
+        for (int i = 0; i < projects.length(); i++) {
+            JSONObject p = projects.getJSONObject(i);
+            if (!p.has("name"))
+                continue;
+            String name = p.getString("name");
+            if (name == null || name.isEmpty())
+                continue;
+            JSONArray roots = p.has("roots") ? p.getJSONArray("roots") : new JSONArray();
+            registerMcpEntries(name, roots);
+        }
     }
 
     /**
@@ -925,7 +968,7 @@ public class Tasks {
         syncProjectsRuntimeCopies();
         scanTarget = name;
         scan();
-        registerMcpEntries(name);
+        registerMcpEntries(name, roots);
     }
 
     /**
@@ -956,6 +999,9 @@ public class Tasks {
             System.err.println("    psql -d code_rag -c 'DROP SCHEMA " + name + " CASCADE'");
             System.exit(1);
         }
+        // Capture the roots before mutating cfg — we need them to know which
+        // .mcp.json files to clean up after the project is gone from the JSON.
+        JSONArray departingRoots = findProject(cfg, name).getJSONArray("roots");
         JSONArray remaining = new JSONArray();
         for (int i = 0; i < projects.length(); i++) {
             JSONObject p = projects.getJSONObject(i);
@@ -966,7 +1012,7 @@ public class Tasks {
         if (!saveProjectsJson(cfg))
             System.exit(1);
         syncProjectsRuntimeCopies();
-        deregisterMcpEntries(name);
+        deregisterMcpEntries(name, departingRoots);
         // bld -y scan all so reconcile drops the schema without prompting
         // (the user already committed by typing remove-project).
         assumeYes = true;
@@ -1017,6 +1063,11 @@ public class Tasks {
         syncProjectsRuntimeCopies();
         scanTarget = name;
         scan();
+        // Drop a .mcp.json into each newly added root so Claude Code sessions
+        // launched from there see the project's tools. Existing roots already
+        // have their .mcp.json from new-project (or a previous bld start
+        // migration pass), so we only register the new ones.
+        registerMcpEntries(name, newRoots);
     }
 
     /**
@@ -1072,6 +1123,19 @@ public class Tasks {
         syncProjectsRuntimeCopies();
         scanTarget = name;
         scan();
+        // Clean up the .mcp.json entry from each removed root. The project
+        // itself still exists, so we only deregister from the departing roots
+        // — the surviving roots keep their entries.
+        boolean hasClaude = isOnPath("claude");
+        if (hasClaude) {
+            for (int i = 0; i < toRemove.length(); i++) {
+                java.io.File root = new java.io.File(toRemove.getString(i));
+                if (!root.isDirectory())
+                    continue;
+                if (runSilentInDir(root, "claude", "mcp", "remove", name, "-s", "project") == 0)
+                    println("removed MCP entry from Claude Code (project scope) in " + root.getAbsolutePath());
+            }
+        }
     }
 
     // ----- Project-management helpers -----
@@ -1272,49 +1336,128 @@ public class Tasks {
      * Register the MCP entry for {@code name} with whichever clients are
      * installed. Silent no-op if neither claude nor codex is detected
      * (the user just hasn't installed an agent yet).
+     *
+     * <p>Claude Code entries are written at <b>project scope</b>: one
+     * {@code .mcp.json} per root listed in {@code rag-projects.json}, so
+     * a Claude Code session only sees the Code-RAG tools when launched
+     * inside that project's tree. Codex doesn't have a scope concept —
+     * its entry stays in {@code ~/.codex/config.toml} and is visible
+     * globally.</p>
      */
-    private static void registerMcpEntries(String name) {
+    private static void registerMcpEntries(String name, JSONArray roots) {
         String url = MCP_BASE_URL + "/" + name;
         String secret = readSharedSecret();
         boolean hasClaude = isOnPath("claude");
         boolean hasCodex  = isOnPath("codex")
                 || new java.io.File(codexConfigPath()).exists();
         if (hasClaude)
-            registerClaudeEntry(name, url, secret);
+            registerClaudeEntry(name, url, secret, roots);
         if (hasCodex)
             registerCodexEntry(name, url, secret);
         if (!hasClaude && !hasCodex)
             println("Neither claude nor codex detected — skipping MCP client registration.");
     }
 
-    private static void deregisterMcpEntries(String name) {
+    private static void deregisterMcpEntries(String name, JSONArray roots) {
         boolean hasClaude = isOnPath("claude");
         boolean hasCodex  = isOnPath("codex")
                 || new java.io.File(codexConfigPath()).exists();
         if (hasClaude)
-            deregisterClaudeEntry(name);
+            deregisterClaudeEntry(name, roots);
         if (hasCodex)
             deregisterCodexEntry(name);
     }
 
-    /** {@code claude mcp add --transport http --scope user ...} — pre-removes any prior entry. */
-    private static void registerClaudeEntry(String name, String url, String secret) {
-        runSilent("claude", "mcp", "remove", name);
-        int code = runInherited("claude", "mcp", "add",
-                "--transport", "http", "--scope", "user", name, url,
-                "--header", "X-RAG-Token: " + secret);
-        if (code == 0) {
-            println("registered MCP entry with Claude Code (user scope)");
-        } else {
-            System.err.println("warning: claude mcp add failed for '" + name + "'. Register manually with:");
-            System.err.println("    claude mcp add --transport http --scope user " + name + " "
+    /**
+     * Write a {@code .mcp.json} entry under each project root via
+     * {@code claude mcp add -s project}. Pre-removes any prior entry
+     * for {@code name} in <i>any</i> scope (user, local, project) so
+     * users on the old user-scope registration get migrated cleanly
+     * the next time bld touches their project.
+     */
+    private static void registerClaudeEntry(String name, String url, String secret, JSONArray roots) {
+        // Migration sweep: clear any pre-existing user-scope or local-scope
+        // entry for this name. user-scope is a single global registration, so
+        // one cwd-less remove handles it. local-scope is keyed by the cwd it
+        // was registered under, so a cwd-less remove only hits the one under
+        // bld's cwd — which is usually NOT where the legacy entry lives. We
+        // have to read claude.json and remove from each entry's actual cwd.
+        runSilent("claude", "mcp", "remove", name, "-s", "user");
+        sweepLegacyLocalScopeEntries(name);
+        if (roots == null || roots.length() == 0) {
+            System.err.println("warning: project '" + name + "' has no roots — skipping Claude Code MCP registration.");
+            return;
+        }
+        boolean anySucceeded = false;
+        for (int i = 0; i < roots.length(); i++) {
+            java.io.File root = new java.io.File(roots.getString(i));
+            if (!root.isDirectory()) {
+                System.err.println("warning: root '" + root + "' does not exist — skipping Claude Code MCP registration there.");
+                continue;
+            }
+            // Idempotency: clear any prior project-scope entry in this root's .mcp.json
+            // before re-adding, so re-running this command never errors on "already exists".
+            runSilentInDir(root, "claude", "mcp", "remove", name, "-s", "project");
+            int code = runInheritedInDir(root, "claude", "mcp", "add",
+                    "--transport", "http", "-s", "project", name, url,
+                    "--header", "X-RAG-Token: " + secret);
+            if (code == 0) {
+                println("registered MCP entry with Claude Code (project scope) in " + root.getAbsolutePath() + "/.mcp.json");
+                anySucceeded = true;
+            } else {
+                System.err.println("warning: claude mcp add failed for '" + name + "' in " + root + ".");
+            }
+        }
+        if (!anySucceeded) {
+            System.err.println("Register manually with (from each project root):");
+            System.err.println("    claude mcp add --transport http -s project " + name + " "
                     + url + " --header \"X-RAG-Token: ...\"");
         }
     }
 
-    private static void deregisterClaudeEntry(String name) {
-        if (runSilent("claude", "mcp", "remove", name) == 0)
-            println("removed MCP entry from Claude Code");
+    /**
+     * Find any local-scope Claude Code entries for {@code name} that
+     * point at a Code-RAG URL, and remove each one by invoking
+     * {@code claude mcp remove -s local} from the cwd it was originally
+     * registered under (which is how local scope identifies entries).
+     */
+    private static void sweepLegacyLocalScopeEntries(String name) {
+        java.io.File claudeCfg = new java.io.File(System.getProperty("user.home"), ".claude.json");
+        if (!claudeCfg.exists())
+            return;
+        for (ClientEntry e : readClaudeCodeEntries(claudeCfg)) {
+            if (!"local".equals(e.scope))
+                continue;
+            if (!name.equals(e.name))
+                continue;
+            if (e.registeredUnder == null)
+                continue;
+            java.io.File dir = new java.io.File(e.registeredUnder);
+            if (!dir.isDirectory())
+                continue;
+            if (runSilentInDir(dir, "claude", "mcp", "remove", name, "-s", "local") == 0)
+                println("removed legacy local-scope MCP entry registered under " + e.registeredUnder);
+        }
+    }
+
+    /**
+     * Remove the project-scope {@code .mcp.json} entry from each root,
+     * and also sweep any legacy user-scope or local-scope entry for the
+     * same name. Silent no-op if nothing matches.
+     */
+    private static void deregisterClaudeEntry(String name, JSONArray roots) {
+        // Legacy sweep — pre-2026 versions wrote user-scope and local-scope entries.
+        runSilent("claude", "mcp", "remove", name, "-s", "user");
+        sweepLegacyLocalScopeEntries(name);
+        if (roots == null)
+            return;
+        for (int i = 0; i < roots.length(); i++) {
+            java.io.File root = new java.io.File(roots.getString(i));
+            if (!root.isDirectory())
+                continue;
+            if (runSilentInDir(root, "claude", "mcp", "remove", name, "-s", "project") == 0)
+                println("removed MCP entry from Claude Code (project scope) in " + root.getAbsolutePath());
+        }
     }
 
     /** Append/replace [mcp_servers.<name>] in ~/.codex/config.toml. */
@@ -1435,6 +1578,32 @@ public class Tasks {
         }
     }
 
+    /** Like {@link #runInherited} but with a specified working directory. */
+    private static int runInheritedInDir(java.io.File dir, String... cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.directory(dir);
+            pb.inheritIO();
+            return pb.start().waitFor();
+        } catch (java.io.IOException | InterruptedException e) {
+            System.err.println("Failed to run " + String.join(" ", cmd) + " in " + dir + ": " + e.getMessage());
+            return -1;
+        }
+    }
+
+    /** Like {@link #runSilent} but with a specified working directory. */
+    private static int runSilentInDir(java.io.File dir, String... cmd) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(cmd);
+            pb.directory(dir);
+            pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
+            pb.redirectError(ProcessBuilder.Redirect.DISCARD);
+            return pb.start().waitFor();
+        } catch (java.io.IOException | InterruptedException e) {
+            return -1;
+        }
+    }
+
     public static void status() {
         String httpP = extractFromFile("tomcat/conf/server.xml",
                 "<Connector port=\"(\\d+)\" protocol=\"HTTP/1\\.1\"", httpPort);
@@ -1494,6 +1663,9 @@ public class Tasks {
         java.io.File claudeCfg = new java.io.File(System.getProperty("user.home"), ".claude.json");
         java.io.File codexCfg  = new java.io.File(System.getProperty("user.home"), ".codex/config.toml");
         java.util.List<ClientEntry> claudeAll = readClaudeCodeEntries(claudeCfg);
+        // Also pick up project-scope entries living in each project root's .mcp.json
+        // — that's where bld start / new-project / add-root write them now.
+        claudeAll.addAll(readProjectScopeClaudeEntries(projects));
         java.util.List<ClientEntry> codexAll  = readCodexEntries(codexCfg);
 
         // Partition each client's entries:
@@ -1519,11 +1691,13 @@ public class Tasks {
             println("  Client configs:     neither ~/.claude.json nor ~/.codex/config.toml found");
         if (claudeCfg.exists()) {
             println("");
-            println("  Note: each Claude Code MCP entry is keyed by the directory it was");
-            println("  registered from. The entry is only visible to Claude Code sessions");
-            println("  launched from that exact directory. The 'registered under …' lines");
-            println("  below state that directory for every entry — compare against the");
-            println("  directory you actually start 'claude' in.");
+            println("  Note: Claude Code MCP entries are written at project scope —");
+            println("  one .mcp.json per project root. A Claude Code session sees the");
+            println("  entry only when launched from somewhere under that root. Each");
+            println("  line below states the root path so you can compare against the");
+            println("  directory you actually start 'claude' in. Any 'user scope'");
+            println("  entries shown are legacy registrations — 'bld start' migrates");
+            println("  them to project scope automatically.");
         }
 
         if (!projects.isEmpty()) {
@@ -1594,14 +1768,21 @@ public class Tasks {
         println("                 ⚠ " + why.toString().replaceFirst("; $", ""));
     }
 
-    /** "registered under …" / "user scope" / "global" — never judges, just states. */
+    /** One-line description of where this entry is visible — never judges, just states. */
     private static String visibilityNote(ClientEntry e, boolean cwdScoped) {
         if (!cwdScoped)
             return "(global — visible to any Codex session)";
-        if (e.registeredUnder == null)
-            return "(user scope — visible from any directory)";
-        return "registered under " + e.registeredUnder
-                + "   (only visible when 'claude' is launched from there)";
+        switch (e.scope) {
+            case "project":
+                return ".mcp.json in " + e.registeredUnder
+                        + "   (visible from anywhere under that tree)";
+            case "local":
+                return "registered under " + e.registeredUnder
+                        + "   (only visible when 'claude' is launched from there)";
+            case "user":
+            default:
+                return "(user scope — visible from any directory; legacy — bld start migrates these to project scope)";
+        }
     }
 
     /** Partition: entries on the current port whose urlProject is in {@code knownProjects}. */
@@ -1677,10 +1858,21 @@ public class Tasks {
     /**
      * A single MCP entry found in a client's config.
      * <ul>
-     *   <li>{@link #name} — the key in claude.json or the TOML section name in Codex.</li>
-     *   <li>{@link #registeredUnder} — the absolute working-directory path the
-     *       entry is registered under (claude.json default <code>--scope local</code>).
-     *       {@code null} for entries not cwd-keyed (Claude Code user-scope, or Codex).</li>
+     *   <li>{@link #name} — the key in claude.json / .mcp.json, or the TOML
+     *       section name in Codex.</li>
+     *   <li>{@link #scope} — Claude Code's registration scope:
+     *       <code>"user"</code> (top-level <code>mcpServers</code> in
+     *       <code>~/.claude.json</code> — visible everywhere),
+     *       <code>"local"</code> (under <code>projects.&lt;cwd&gt;.mcpServers</code>
+     *       in <code>~/.claude.json</code> — only visible from that cwd),
+     *       <code>"project"</code> (a <code>.mcp.json</code> in a project
+     *       root — visible from anywhere under that tree),
+     *       <code>"global"</code> (Codex; visible to any Codex session).</li>
+     *   <li>{@link #registeredUnder} — the absolute directory the entry is
+     *       keyed to. For <code>local</code> scope it's the cwd in
+     *       <code>~/.claude.json</code>; for <code>project</code> scope it's the
+     *       project root containing the <code>.mcp.json</code>. {@code null}
+     *       for entries not cwd-keyed (user scope, or Codex).</li>
      *   <li>{@link #urlPort} — the port in the entry's URL. If this differs
      *       from the server's current HTTP port the entry is stale.</li>
      *   <li>{@link #urlProject} — the project segment from the URL path
@@ -1690,11 +1882,13 @@ public class Tasks {
      */
     static class ClientEntry {
         final String name;
+        final String scope;
         final String registeredUnder;
         final String urlPort;
         final String urlProject;
-        ClientEntry(String name, String registeredUnder, String urlPort, String urlProject) {
+        ClientEntry(String name, String registeredUnder, String scope, String urlPort, String urlProject) {
             this.name = name;
+            this.scope = scope;
             this.registeredUnder = registeredUnder;
             this.urlPort = urlPort;
             this.urlProject = urlProject == null ? "" : urlProject;
@@ -1744,9 +1938,57 @@ public class Tasks {
                     java.util.regex.Matcher pm = pathKeyPat.matcher(beforeMcp);
                     while (pm.find()) regUnder = pm.group(1);
                 }
-                out.add(new ClientEntry(lastName, regUnder, port, project));
+                String scope = (regUnder == null) ? "user" : "local";
+                out.add(new ClientEntry(lastName, regUnder, scope, port, project));
             }
         } catch (java.io.IOException ignored) {}
+        return out;
+    }
+
+    /**
+     * Walk each project's roots looking for a {@code .mcp.json} file and
+     * collect any MCP entries inside it whose URL targets a Code-RAG
+     * server. Entries are reported with {@code scope = "project"} and
+     * {@code registeredUnder} set to the root path.
+     *
+     * <p>A {@code .mcp.json} is shared with other tooling (it's the
+     * agreed-upon location for project-scope MCP entries), so a single
+     * root may carry unrelated entries — they're filtered out by the URL
+     * pattern matching {@code http://127.0.0.1:&lt;port&gt;/rag-mcp/...}.</p>
+     */
+    private static java.util.List<ClientEntry> readProjectScopeClaudeEntries(
+            java.util.Map<String, java.util.List<String>> projects) {
+        java.util.List<ClientEntry> out = new java.util.ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (java.util.List<String> roots : projects.values()) {
+            for (String root : roots) {
+                if (!seen.add(root))
+                    continue;  // a root could appear in multiple projects
+                java.io.File mcp = new java.io.File(root, ".mcp.json");
+                if (!mcp.isFile())
+                    continue;
+                try {
+                    String content = new String(java.nio.file.Files.readAllBytes(mcp.toPath()),
+                                                java.nio.charset.StandardCharsets.UTF_8);
+                    java.util.regex.Pattern urlPat = java.util.regex.Pattern.compile(
+                            "http://127\\.0\\.0\\.1:(\\d+)/rag-mcp(?:/([a-zA-Z0-9_.-]+))?");
+                    java.util.regex.Pattern namePat =
+                            java.util.regex.Pattern.compile("\"([a-zA-Z0-9_.-]+)\"\\s*:\\s*\\{");
+                    java.util.regex.Matcher um = urlPat.matcher(content);
+                    while (um.find()) {
+                        String port = um.group(1);
+                        String project = um.group(2);
+                        String before = content.substring(0, um.start());
+                        java.util.regex.Matcher m = namePat.matcher(before);
+                        String lastName = null;
+                        while (m.find()) lastName = m.group(1);
+                        if (lastName == null)
+                            continue;
+                        out.add(new ClientEntry(lastName, root, "project", port, project));
+                    }
+                } catch (java.io.IOException ignored) {}
+            }
+        }
         return out;
     }
 
@@ -1800,7 +2042,7 @@ public class Tasks {
         java.util.regex.Matcher rm = ragMcpPat.matcher(url);
         if (!rm.find())
             return;
-        out.add(new ClientEntry(entryName, null, rm.group(1), rm.group(2)));
+        out.add(new ClientEntry(entryName, null, "global", rm.group(1), rm.group(2)));
     }
 
     /** Extract group 1 of the first match of {@code regex} in {@code file}, or {@code fallback}. */
