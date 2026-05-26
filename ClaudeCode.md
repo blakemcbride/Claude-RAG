@@ -13,16 +13,17 @@ use** — start the server the same way, maintain the same
 The only difference is on the *client* side: how each agent learns
 about the MCP server.
 
-## Two config files involved
+## Config files involved
 
-Working with Code-RAG through Claude Code touches two distinct config
-files, owned by opposite sides of the system. The most common point of
-confusion is mixing up their roles, so:
+Working with Code-RAG through Claude Code touches up to three distinct
+config files, owned by opposite sides of the system. The most common
+point of confusion is mixing up their roles, so:
 
 | File | What it does | Who edits it | When you touch it |
 |---|---|---|---|
-| `src/main/backend/rag-projects.json` | Tells the Code-RAG **server** which code trees to index. One JSON entry per project: `name`, absolute `roots[]`, optional `excludeGlobs`. Gitignored — the committed `.example` is just a template. | You (hand-edit). | When adding/removing a project or changing its roots. Restart Kiss after editing so the new schema gets bootstrapped. |
-| `<project_root>/.mcp.json` | Tells **Claude Code** which MCP servers are available when launched from this project's tree. One file per project root listed in `rag-projects.json` — Code-RAG writes them automatically. | `bld` (via `claude mcp add -s project`). Don't hand-edit unless you have to. | Maintained automatically by `bld new-project`, `add-root`, `remove-root`, `remove-project`, and `bld start`. |
+| `src/main/backend/rag-projects.json` | Tells the Code-RAG **server** which code trees to index. One JSON entry per project: `name`, absolute `roots[]`, optional `project_dir`, optional `excludeGlobs`. Gitignored — the committed `.example` is just a template. | You (hand-edit). | When adding/removing a project, changing its roots, or setting/clearing `project_dir`. Restart Kiss after editing so the new schema gets bootstrapped. |
+| `<project_root>/.mcp.json` and `<project_dir>/.mcp.json` | Tells **Claude Code** which MCP servers are available when launched from this tree. One file per configured root, plus one in `project_dir` if set. Code-RAG writes them automatically. | `bld` (via `claude mcp add -s project`). Don't hand-edit unless you have to. | Maintained automatically by `bld new-project`, `add-root`, `remove-root`, `remove-project`, and `bld start`. |
+| `<project_dir>/CLAUDE.md` (managed block only) | Tells **Claude Code** how to choose between MCP `search_code` and native Grep. Only written when `project_dir` is set on the project. Bld manages a marker-delimited block; anything outside the markers is left alone. | `bld`. Don't edit *between* the markers — bld will overwrite it. | Maintained automatically alongside the matching `.mcp.json`. Removed by `bld remove-project`. |
 
 The two files don't communicate directly. The **bridge is the URL**: in
 each `.mcp.json` you have an MCP entry with URL
@@ -88,6 +89,23 @@ Practical consequences:
   `~/.claude.json`'s top-level `mcpServers`, the next `bld start` will
   remove them and write project-scope `.mcp.json` files in each root.
   Idempotent — safe to re-run.
+- **Umbrella directory (`project_dir`).** If you launch `claude` from
+  a parent directory that sits *above* the configured roots — common
+  for projects assembled from multiple sibling repos — neither the
+  `.mcp.json` nor the `CLAUDE.md` from inside a root will be visible
+  (Claude Code only walks *up* from cwd). For that case, declare a
+  `project_dir` on the project:
+  ```bash
+  bld new-project myproj --project-dir /home/me/umbrella \
+      /home/me/umbrella/api /home/me/umbrella/web
+  ```
+  bld then writes a second `.mcp.json` in the umbrella directory *and*
+  inserts a managed routing snippet into `<umbrella>/CLAUDE.md` —
+  see "Managed CLAUDE.md block" at the end of §5 for what that snippet
+  contains and how it is rewritten. The umbrella itself is not
+  indexed — only the roots are. To add `project_dir` to an existing
+  project, hand-edit `rag-projects.json` and run
+  `./bld stop && ./bld start`.
 
 ## 0. Prerequisites
 
@@ -252,6 +270,33 @@ segment (`/rag-mcp/<project>`) is the server's routing — it must
 match a real project's `name` in `rag-projects.json`. The MCP entry
 name is just Claude Code's local label for that registration. They
 can differ (though conventionally we use the project name for both).
+
+### Managed CLAUDE.md block (when `project_dir` is set)
+
+When a project declares `project_dir`, bld additionally writes a
+managed block into `<project_dir>/CLAUDE.md`. Registering the MCP
+server alone isn't enough — Claude Code's tool-selection heuristics
+prefer native Grep/Glob over MCP search tools for code exploration,
+so the `mcp__<project>__search_code` tool often goes unused even
+when available. The CLAUDE.md block ships a routing rule that biases
+the selection: use `search_code` for conceptual queries, Grep for
+literal-token lookups.
+
+The block is delimited by HTML-comment markers
+(`<!-- BEGIN code-rag managed block ... -->` / `<!-- END ... -->`).
+Everything between them is bld-managed and will be rewritten on the
+next `bld start` / `bld new-project` / `bld add-root`. Everything
+outside the markers is left untouched — bld appends the block to an
+existing CLAUDE.md, or creates the file if none exists.
+
+`bld remove-project` excises the block on the way out. If the
+resulting file is empty, bld deletes it; otherwise the surrounding
+content is preserved.
+
+If you decide you don't want the routing rule, removing
+`project_dir` from `rag-projects.json` stops bld from re-asserting
+the block — but the existing block stays put until you delete it
+by hand (or run `remove-project` + `new-project`).
 
 ## 6. Operations and triggering scans
 

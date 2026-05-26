@@ -237,7 +237,12 @@ public class Tasks {
         println("stop                                      stop the background backend");
         println("status                                    report whether the system is running and its config");
         println("scan <project|all>                        reconcile rag-projects.json then rescan");
-        println("new-project <name> <root> [<root>...]     add a project + bootstrap + register MCP entries");
+        println("new-project <name> [--project-dir <dir>] <root> [<root>...]");
+        println("                                          add a project + bootstrap + register MCP entries");
+        println("                                          --project-dir <dir> drops .mcp.json + a CLAUDE.md");
+        println("                                          routing snippet at <dir> so a Claude Code session");
+        println("                                          launched from there (an umbrella directory above");
+        println("                                          the roots) sees the MCP tool");
         println("remove-project <name>                     drop a project + deregister MCP entries");
         println("add-root <name> <root> [<root>...]        add roots to an existing project");
         println("remove-root <name> <root> [<root>...]     remove roots from an existing project");
@@ -550,7 +555,8 @@ public class Tasks {
             if (name == null || name.isEmpty())
                 continue;
             JSONArray roots = p.has("roots") ? p.getJSONArray("roots") : new JSONArray();
-            registerMcpEntries(name, roots);
+            String projectDir = p.has("project_dir") ? p.getString("project_dir", null) : null;
+            registerMcpEntries(name, roots, projectDir);
         }
     }
 
@@ -942,11 +948,13 @@ public class Tasks {
      * clients.
      */
     public static void newProject() {
-        if (commandArgs.length < 2) {
-            System.err.println("Usage: ./bld new-project <name> <root> [<root>...]");
+        String[] projectDirHolder = new String[1];
+        String[] remaining = consumeProjectDirFlag(commandArgs, projectDirHolder);
+        if (remaining.length < 2) {
+            System.err.println("Usage: ./bld new-project <name> [--project-dir <dir>] <root> [<root>...]");
             System.exit(1);
         }
-        String name = canonicalizeProjectName(commandArgs[0]);
+        String name = canonicalizeProjectName(remaining[0]);
         if (!requireValidProjectName(name))
             System.exit(1);
         JSONObject cfg = loadProjectsJson();
@@ -956,11 +964,19 @@ public class Tasks {
             System.err.println("Project '" + name + "' already exists in rag-projects.json (use add-root to extend it).");
             System.exit(1);
         }
-        JSONArray roots = resolveRootsStrict(commandArgs, 1);
+        JSONArray roots = resolveRootsStrict(remaining, 1);
         if (roots == null)
             System.exit(1);
+        String projectDir = null;
+        if (projectDirHolder[0] != null) {
+            projectDir = validateProjectDir(projectDirHolder[0], roots);
+            if (projectDir == null)
+                System.exit(1);
+        }
         JSONObject project = new JSONObject();
         project.put("name", name);
+        if (projectDir != null)
+            project.put("project_dir", projectDir);
         project.put("roots", roots);
         cfg.getJSONArray("projects").put(project);
         if (!saveProjectsJson(cfg))
@@ -968,7 +984,7 @@ public class Tasks {
         syncProjectsRuntimeCopies();
         scanTarget = name;
         scan();
-        registerMcpEntries(name, roots);
+        registerMcpEntries(name, roots, projectDir);
     }
 
     /**
@@ -999,9 +1015,13 @@ public class Tasks {
             System.err.println("    psql -d code_rag -c 'DROP SCHEMA " + name + " CASCADE'");
             System.exit(1);
         }
-        // Capture the roots before mutating cfg — we need them to know which
-        // .mcp.json files to clean up after the project is gone from the JSON.
-        JSONArray departingRoots = findProject(cfg, name).getJSONArray("roots");
+        // Capture roots + project_dir before mutating cfg — we need them to
+        // know which .mcp.json files (and which CLAUDE.md block) to clean up
+        // after the project is gone from the JSON.
+        JSONObject existingProj = findProject(cfg, name);
+        JSONArray departingRoots = existingProj.getJSONArray("roots");
+        String departingProjectDir = existingProj.has("project_dir")
+                ? existingProj.getString("project_dir", null) : null;
         JSONArray remaining = new JSONArray();
         for (int i = 0; i < projects.length(); i++) {
             JSONObject p = projects.getJSONObject(i);
@@ -1012,7 +1032,7 @@ public class Tasks {
         if (!saveProjectsJson(cfg))
             System.exit(1);
         syncProjectsRuntimeCopies();
-        deregisterMcpEntries(name, departingRoots);
+        deregisterMcpEntries(name, departingRoots, departingProjectDir);
         // bld -y scan all so reconcile drops the schema without prompting
         // (the user already committed by typing remove-project).
         assumeYes = true;
@@ -1066,8 +1086,10 @@ public class Tasks {
         // Drop a .mcp.json into each newly added root so Claude Code sessions
         // launched from there see the project's tools. Existing roots already
         // have their .mcp.json from new-project (or a previous bld start
-        // migration pass), so we only register the new ones.
-        registerMcpEntries(name, newRoots);
+        // migration pass), so we only register the new ones. The project_dir
+        // (if any) is also already registered — pass null so we don't
+        // re-write the CLAUDE.md block on every add-root.
+        registerMcpEntries(name, newRoots, null);
     }
 
     /**
@@ -1285,6 +1307,214 @@ public class Tasks {
         return out;
     }
 
+    /**
+     * Pop {@code --project-dir <dir>} from {@code args} (anywhere in the
+     * positional list). The extracted value (or null) is returned via
+     * {@code out[0]}; the rest of the positionals come back as a fresh
+     * array. Exits with an error if the flag appears more than once or
+     * has no value.
+     */
+    private static String[] consumeProjectDirFlag(String[] args, String[] out) {
+        out[0] = null;
+        java.util.List<String> kept = new java.util.ArrayList<>();
+        for (int i = 0; i < args.length; i++) {
+            if ("--project-dir".equals(args[i])) {
+                if (i + 1 >= args.length) {
+                    System.err.println("--project-dir requires a value.");
+                    System.exit(1);
+                }
+                if (out[0] != null) {
+                    System.err.println("--project-dir specified more than once.");
+                    System.exit(1);
+                }
+                out[0] = args[i + 1];
+                i++;
+            } else {
+                kept.add(args[i]);
+            }
+        }
+        return kept.toArray(new String[0]);
+    }
+
+    /**
+     * Resolve {@code --project-dir <dir>} to an absolute canonical path
+     * and validate it. Returns the canonical path, or null with a stderr
+     * message on failure. Rules:
+     * <ul>
+     *   <li>must exist as a directory</li>
+     *   <li>must not equal any configured root (would duplicate the
+     *       .mcp.json that's already written there)</li>
+     *   <li>must not be {@code $HOME} or {@code /} — both are too
+     *       broad to safely drop a managed CLAUDE.md block into</li>
+     * </ul>
+     */
+    private static String validateProjectDir(String raw, JSONArray roots) {
+        java.io.File f = new java.io.File(raw);
+        String abs;
+        try {
+            abs = f.getCanonicalPath();
+        } catch (java.io.IOException e) {
+            System.err.println("Cannot resolve --project-dir '" + raw + "': " + e.getMessage());
+            return null;
+        }
+        if (!new java.io.File(abs).isDirectory()) {
+            System.err.println("--project-dir does not exist or is not a directory: " + raw);
+            return null;
+        }
+        String home = System.getProperty("user.home");
+        if (abs.equals(home) || abs.equals("/")) {
+            System.err.println("--project-dir refuses '" + abs
+                    + "': too broad to drop a managed CLAUDE.md block into.");
+            return null;
+        }
+        if (roots != null) {
+            for (int i = 0; i < roots.length(); i++) {
+                if (abs.equals(roots.getString(i))) {
+                    System.err.println("--project-dir equals a configured root: " + abs);
+                    System.err.println("That root already gets its own .mcp.json — specifying it as project_dir is redundant.");
+                    return null;
+                }
+            }
+        }
+        return abs;
+    }
+
+    // ----- CLAUDE.md managed block (at project_dir) -----
+
+    /**
+     * When project_dir is set, bld drops a managed block into
+     * {@code <project_dir>/CLAUDE.md} that biases Claude Code toward
+     * the MCP search_code tool for conceptual queries and toward Grep
+     * for literal-token lookups. Without this block the .mcp.json
+     * alone tends not to shift Claude Code's tool-selection heuristics
+     * — see Setup.md / ClaudeCode.md for the rationale.
+     *
+     * <p>The block is delimited by stable HTML comments so we can find
+     * and rewrite (or excise) it on subsequent runs. Anything outside
+     * the markers — including a user's hand-written CLAUDE.md content —
+     * is left untouched.</p>
+     */
+    private static final String CLAUDE_MD_BLOCK_BEGIN =
+            "<!-- BEGIN code-rag managed block — do not edit between markers; bld rewrites it -->";
+    private static final String CLAUDE_MD_BLOCK_END =
+            "<!-- END code-rag managed block -->";
+    private static final String CLAUDE_MD_BLOCK_BODY =
+            "This repository is indexed by Code-RAG (a local MCP server exposing\n" +
+            "`search_code`, `get_chunk`, `list_repos`, `index_status`). Choose tool\n" +
+            "by what you are looking for:\n" +
+            "\n" +
+            "- Exact known string, symbol, file name, or import → use Grep / Glob.\n" +
+            "- Conceptual lookup (\"where do we handle retries\", \"what code does X\",\n" +
+            "  \"find anything related to permission checks\") → use `search_code`.\n" +
+            "  It does similarity search over the whole tree and finds related code\n" +
+            "  grep cannot, without having to guess keywords.\n" +
+            "- Confirm or expand a `search_code` hit → `get_chunk` for just that\n" +
+            "  chunk, or Read on the returned path + line range for surrounding code.\n" +
+            "\n" +
+            "Default to `search_code` for any \"find code that does X\" question when X\n" +
+            "is a concept rather than a literal token. Default to Grep when X is a\n" +
+            "token you already know appears verbatim.\n";
+
+    /**
+     * Create or update {@code <projectDir>/CLAUDE.md} so it contains the
+     * managed block. If the file does not exist, it is created containing
+     * only the block. If it exists and already contains the markers, the
+     * block between them is replaced (preserving everything outside).
+     * Otherwise the block is appended.
+     */
+    private static void writeClaudeMdBlock(java.io.File projectDir) {
+        java.io.File md = new java.io.File(projectDir, "CLAUDE.md");
+        String existing;
+        boolean preexisting = md.exists();
+        if (preexisting) {
+            try {
+                existing = new String(java.nio.file.Files.readAllBytes(md.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8);
+            } catch (java.io.IOException e) {
+                System.err.println("warning: cannot read " + md + ": " + e.getMessage());
+                return;
+            }
+        } else {
+            existing = "";
+        }
+        String managed = CLAUDE_MD_BLOCK_BEGIN + "\n" + CLAUDE_MD_BLOCK_BODY + CLAUDE_MD_BLOCK_END + "\n";
+        int beginIdx = existing.indexOf(CLAUDE_MD_BLOCK_BEGIN);
+        int endIdx = existing.indexOf(CLAUDE_MD_BLOCK_END);
+        String updated;
+        if (beginIdx >= 0 && endIdx > beginIdx) {
+            int endLineEnd = existing.indexOf('\n', endIdx);
+            if (endLineEnd < 0)
+                endLineEnd = existing.length();
+            else
+                endLineEnd++;
+            updated = existing.substring(0, beginIdx) + managed + existing.substring(endLineEnd);
+        } else {
+            StringBuilder sb = new StringBuilder(existing);
+            if (!existing.isEmpty() && !existing.endsWith("\n"))
+                sb.append("\n");
+            if (!existing.isEmpty())
+                sb.append("\n");
+            sb.append(managed);
+            updated = sb.toString();
+        }
+        if (updated.equals(existing))
+            return;
+        try {
+            java.nio.file.Files.write(md.toPath(),
+                    updated.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            println(preexisting
+                    ? "updated " + md.getAbsolutePath() + " (Code-RAG block)"
+                    : "wrote " + md.getAbsolutePath());
+        } catch (java.io.IOException e) {
+            System.err.println("warning: cannot write " + md + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Excise the managed block from {@code <projectDir>/CLAUDE.md} (no-op
+     * if either the file or the markers are absent). If removing the
+     * block leaves the file effectively empty, the file is deleted.
+     */
+    private static void removeClaudeMdBlock(java.io.File projectDir) {
+        java.io.File md = new java.io.File(projectDir, "CLAUDE.md");
+        if (!md.exists())
+            return;
+        String existing;
+        try {
+            existing = new String(java.nio.file.Files.readAllBytes(md.toPath()),
+                    java.nio.charset.StandardCharsets.UTF_8);
+        } catch (java.io.IOException e) {
+            System.err.println("warning: cannot read " + md + ": " + e.getMessage());
+            return;
+        }
+        int beginIdx = existing.indexOf(CLAUDE_MD_BLOCK_BEGIN);
+        int endIdx = existing.indexOf(CLAUDE_MD_BLOCK_END);
+        if (beginIdx < 0 || endIdx < beginIdx)
+            return;
+        int endLineEnd = existing.indexOf('\n', endIdx);
+        if (endLineEnd < 0)
+            endLineEnd = existing.length();
+        else
+            endLineEnd++;
+        String updated = existing.substring(0, beginIdx) + existing.substring(endLineEnd);
+        // Collapse the extra blank line we inserted on append, so successive
+        // add/remove cycles don't accumulate vertical whitespace.
+        while (updated.contains("\n\n\n"))
+            updated = updated.replace("\n\n\n", "\n\n");
+        if (updated.trim().isEmpty()) {
+            if (md.delete())
+                println("removed " + md.getAbsolutePath());
+            return;
+        }
+        try {
+            java.nio.file.Files.write(md.toPath(),
+                    updated.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            println("removed Code-RAG block from " + md.getAbsolutePath());
+        } catch (java.io.IOException e) {
+            System.err.println("warning: cannot write " + md + ": " + e.getMessage());
+        }
+    }
+
     /** Like {@link #resolveRootsStrict}, but accepts paths that no longer exist on disk. */
     private static JSONArray resolveRootsLenient(String[] args, int offset) {
         JSONArray out = new JSONArray();
@@ -1344,28 +1574,45 @@ public class Tasks {
      * its entry stays in {@code ~/.codex/config.toml} and is visible
      * globally.</p>
      */
-    private static void registerMcpEntries(String name, JSONArray roots) {
+    private static void registerMcpEntries(String name, JSONArray roots, String projectDir) {
         String url = MCP_BASE_URL + "/" + name;
         String secret = readSharedSecret();
         boolean hasClaude = isOnPath("claude");
         boolean hasCodex  = isOnPath("codex")
                 || new java.io.File(codexConfigPath()).exists();
+        JSONArray claudeDirs = combinedRegistrationDirs(roots, projectDir);
         if (hasClaude)
-            registerClaudeEntry(name, url, secret, roots);
+            registerClaudeEntry(name, url, secret, claudeDirs);
         if (hasCodex)
             registerCodexEntry(name, url, secret);
-        if (!hasClaude && !hasCodex)
+        if (projectDir != null && !projectDir.isEmpty())
+            writeClaudeMdBlock(new java.io.File(projectDir));
+        if (!hasClaude && !hasCodex && (projectDir == null || projectDir.isEmpty()))
             println("Neither claude nor codex detected — skipping MCP client registration.");
     }
 
-    private static void deregisterMcpEntries(String name, JSONArray roots) {
+    private static void deregisterMcpEntries(String name, JSONArray roots, String projectDir) {
         boolean hasClaude = isOnPath("claude");
         boolean hasCodex  = isOnPath("codex")
                 || new java.io.File(codexConfigPath()).exists();
+        JSONArray claudeDirs = combinedRegistrationDirs(roots, projectDir);
         if (hasClaude)
-            deregisterClaudeEntry(name, roots);
+            deregisterClaudeEntry(name, claudeDirs);
         if (hasCodex)
             deregisterCodexEntry(name);
+        if (projectDir != null && !projectDir.isEmpty())
+            removeClaudeMdBlock(new java.io.File(projectDir));
+    }
+
+    /** roots ++ projectDir (if set), as a fresh JSONArray for Claude registration. */
+    private static JSONArray combinedRegistrationDirs(JSONArray roots, String projectDir) {
+        JSONArray out = new JSONArray();
+        if (roots != null)
+            for (int i = 0; i < roots.length(); i++)
+                out.put(roots.getString(i));
+        if (projectDir != null && !projectDir.isEmpty())
+            out.put(projectDir);
+        return out;
     }
 
     /**
@@ -1668,12 +1915,18 @@ public class Tasks {
         //               isn't in rag-projects.json
         java.util.LinkedHashMap<String, java.util.List<String>> projects =
                 readProjects("src/main/backend/rag-projects.json");
+        java.util.LinkedHashMap<String, String> projectDirs =
+                readProjectDirs("src/main/backend/rag-projects.json");
         java.io.File claudeCfg = new java.io.File(System.getProperty("user.home"), ".claude.json");
         java.io.File codexCfg  = new java.io.File(System.getProperty("user.home"), ".codex/config.toml");
         java.util.List<ClientEntry> claudeAll = readClaudeCodeEntries(claudeCfg);
         // Also pick up project-scope entries living in each project root's .mcp.json
-        // — that's where bld start / new-project / add-root write them now.
-        claudeAll.addAll(readProjectScopeClaudeEntries(projects));
+        // and in any configured project_dir — that's where bld writes them now.
+        java.util.LinkedHashSet<String> projectScopeDirs = new java.util.LinkedHashSet<>();
+        for (java.util.List<String> rs : projects.values())
+            projectScopeDirs.addAll(rs);
+        projectScopeDirs.addAll(projectDirs.values());
+        claudeAll.addAll(readProjectScopeClaudeEntries(projectScopeDirs));
         java.util.List<ClientEntry> codexAll  = readCodexEntries(codexCfg);
 
         // Partition each client's entries:
@@ -1716,6 +1969,9 @@ public class Tasks {
                 java.util.List<String> roots = p.getValue();
                 println("");
                 println("    " + name);
+                String pdir = projectDirs.get(name);
+                if (pdir != null && !pdir.isEmpty())
+                    println("      project_dir:  " + pdir);
                 if (roots.isEmpty()) {
                     println("      roots:        (none configured)");
                 } else if (roots.size() == 1) {
@@ -1863,6 +2119,39 @@ public class Tasks {
     }
 
     /**
+     * Parallel to {@link #readProjects} — returns the {@code project_dir}
+     * value for each project that has one. Projects without {@code project_dir}
+     * are omitted from the map. Uses the same lightweight regex strategy.
+     */
+    private static java.util.LinkedHashMap<String, String> readProjectDirs(String file) {
+        java.util.LinkedHashMap<String, String> out = new java.util.LinkedHashMap<>();
+        java.nio.file.Path p = java.nio.file.Paths.get(file);
+        if (!java.nio.file.Files.exists(p)) return out;
+        try {
+            String content = new String(java.nio.file.Files.readAllBytes(p), java.nio.charset.StandardCharsets.UTF_8);
+            java.util.regex.Matcher nameMatcher =
+                    java.util.regex.Pattern.compile("\"name\"\\s*:\\s*\"([^\"]+)\"").matcher(content);
+            java.util.regex.Pattern dirPat =
+                    java.util.regex.Pattern.compile("\"project_dir\"\\s*:\\s*\"([^\"]+)\"");
+            java.util.List<int[]> spans = new java.util.ArrayList<>();
+            java.util.List<String> names = new java.util.ArrayList<>();
+            while (nameMatcher.find()) {
+                spans.add(new int[]{nameMatcher.start(), nameMatcher.end()});
+                names.add(nameMatcher.group(1));
+            }
+            for (int i = 0; i < names.size(); i++) {
+                int sliceStart = spans.get(i)[1];
+                int sliceEnd = (i + 1 < spans.size()) ? spans.get(i + 1)[0] : content.length();
+                String slice = content.substring(sliceStart, sliceEnd);
+                java.util.regex.Matcher dm = dirPat.matcher(slice);
+                if (dm.find())
+                    out.put(names.get(i), dm.group(1));
+            }
+        } catch (java.io.IOException ignored) {}
+        return out;
+    }
+
+    /**
      * A single MCP entry found in a client's config.
      * <ul>
      *   <li>{@link #name} — the key in claude.json / .mcp.json, or the TOML
@@ -1964,37 +2253,35 @@ public class Tasks {
      * pattern matching {@code http://127.0.0.1:&lt;port&gt;/rag-mcp/...}.</p>
      */
     private static java.util.List<ClientEntry> readProjectScopeClaudeEntries(
-            java.util.Map<String, java.util.List<String>> projects) {
+            java.util.Collection<String> dirs) {
         java.util.List<ClientEntry> out = new java.util.ArrayList<>();
         java.util.Set<String> seen = new java.util.HashSet<>();
-        for (java.util.List<String> roots : projects.values()) {
-            for (String root : roots) {
-                if (!seen.add(root))
-                    continue;  // a root could appear in multiple projects
-                java.io.File mcp = new java.io.File(root, ".mcp.json");
-                if (!mcp.isFile())
-                    continue;
-                try {
-                    String content = new String(java.nio.file.Files.readAllBytes(mcp.toPath()),
-                                                java.nio.charset.StandardCharsets.UTF_8);
-                    java.util.regex.Pattern urlPat = java.util.regex.Pattern.compile(
-                            "http://127\\.0\\.0\\.1:(\\d+)/rag-mcp(?:/([a-zA-Z0-9_.-]+))?");
-                    java.util.regex.Pattern namePat =
-                            java.util.regex.Pattern.compile("\"([a-zA-Z0-9_.-]+)\"\\s*:\\s*\\{");
-                    java.util.regex.Matcher um = urlPat.matcher(content);
-                    while (um.find()) {
-                        String port = um.group(1);
-                        String project = um.group(2);
-                        String before = content.substring(0, um.start());
-                        java.util.regex.Matcher m = namePat.matcher(before);
-                        String lastName = null;
-                        while (m.find()) lastName = m.group(1);
-                        if (lastName == null)
-                            continue;
-                        out.add(new ClientEntry(lastName, root, "project", port, project));
-                    }
-                } catch (java.io.IOException ignored) {}
-            }
+        for (String root : dirs) {
+            if (!seen.add(root))
+                continue;  // a dir could appear under multiple projects
+            java.io.File mcp = new java.io.File(root, ".mcp.json");
+            if (!mcp.isFile())
+                continue;
+            try {
+                String content = new String(java.nio.file.Files.readAllBytes(mcp.toPath()),
+                                            java.nio.charset.StandardCharsets.UTF_8);
+                java.util.regex.Pattern urlPat = java.util.regex.Pattern.compile(
+                        "http://127\\.0\\.0\\.1:(\\d+)/rag-mcp(?:/([a-zA-Z0-9_.-]+))?");
+                java.util.regex.Pattern namePat =
+                        java.util.regex.Pattern.compile("\"([a-zA-Z0-9_.-]+)\"\\s*:\\s*\\{");
+                java.util.regex.Matcher um = urlPat.matcher(content);
+                while (um.find()) {
+                    String port = um.group(1);
+                    String project = um.group(2);
+                    String before = content.substring(0, um.start());
+                    java.util.regex.Matcher m = namePat.matcher(before);
+                    String lastName = null;
+                    while (m.find()) lastName = m.group(1);
+                    if (lastName == null)
+                        continue;
+                    out.add(new ClientEntry(lastName, root, "project", port, project));
+                }
+            } catch (java.io.IOException ignored) {}
         }
         return out;
     }

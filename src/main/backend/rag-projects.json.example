@@ -1,11 +1,14 @@
 {
   "_comment": "Edit this file to declare your projects. Each project becomes a PostgreSQL schema (in the code_rag database) and is exposed at /rag-mcp/<name> for MCP-capable agents (Claude Code, OpenAI Codex CLI, etc.). Restart the server after editing so the schema is bootstrapped.",
+  "_comment_project_dir": "Optional 'project_dir' is an umbrella directory ABOVE the roots — typically where you launch 'claude'. bld writes a second .mcp.json there (so the MCP tool is visible from the umbrella) and a CLAUDE.md routing snippet (so Claude Code prefers search_code for conceptual queries). It is NOT indexed; only 'roots' get scanned.",
 
   "projects": [
     {
       "name": "demo",
+      "project_dir": "/path/to/your/umbrella",
       "roots": [
-        "/path/to/your/code"
+        "/path/to/your/umbrella/sub-repo-1",
+        "/path/to/your/umbrella/sub-repo-2"
       ],
       "excludeGlobs": [
         "**/node_modules", "**/node_modules/**",

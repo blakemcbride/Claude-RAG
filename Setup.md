@@ -376,7 +376,8 @@ the change yet — open a fresh terminal or `exec bash` again.
 code-rag start                               # build + start the server
 code-rag status                              # is it running? which projects?
 code-rag scan <project|all>                  # incremental reconcile + scan
-code-rag new-project <name> <root>...        # add a project, index it, register MCP entries
+code-rag new-project <name> [--project-dir <dir>] <root>...
+                                             # add a project, index it, register MCP entries
 code-rag remove-project <name>               # remove a project (drops schema, deregisters MCP entries)
 code-rag add-root <name> <root>...           # add roots to an existing project
 code-rag remove-root <name> <root>...        # remove roots from an existing project
@@ -407,6 +408,22 @@ Project names must match `[a-z][a-z0-9_]*` (they become PostgreSQL
 schema names). Dashes are auto-rewritten to underscores with a
 note — `code-rag new-project my-proj /path` is accepted and stored as
 `my_proj`.
+
+`--project-dir <dir>` (optional, single occurrence) names an
+**umbrella directory above the roots** — typically where you launch
+`claude` for the project. When set, bld additionally drops a
+`.mcp.json` in `<dir>` (so the MCP tool is visible from the umbrella)
+and writes a managed CLAUDE.md routing snippet in `<dir>/CLAUDE.md`
+(so Claude Code prefers `search_code` for conceptual queries over
+Grep). `<dir>` is *not* indexed — only the explicit `roots` are
+scanned. The argument must be an existing directory, must not equal
+one of the roots, and may not be `$HOME` or `/`. For an existing
+project, hand-edit `rag-projects.json` to add a `"project_dir": "..."`
+field and run `./bld stop && ./bld start` — `bld start`
+re-asserts every project's MCP entries (including the new
+`project_dir` location). Removing `project_dir` from the JSON leaves
+the previously-written `.mcp.json` and CLAUDE.md block in place; clean
+them up by hand or via `remove-project` + `new-project`.
 
 ---
 

@@ -76,7 +76,10 @@ the user can port it upstream rather than carrying a local fork.
 ./bld status                                      # is it running? which ports? config? projects? MCP entries?
 ./bld scan <project|all>                          # reconcile rag-projects.json with DB, then incremental sweep
 ./bld -y scan <project|all>                       # same, but skip the destructive-action confirmation prompt
-./bld new-project <name> <root> [<root>...]       # add a project, scan it, auto-register MCP entries with Claude Code / Codex
+./bld new-project <name> [--project-dir <dir>] <root> [<root>...]
+                                                  # add a project, scan it, auto-register MCP entries with Claude Code / Codex
+                                                  # --project-dir <dir>: umbrella directory above the roots (NOT indexed);
+                                                  #   bld drops a .mcp.json there and a managed CLAUDE.md routing snippet
 ./bld remove-project <name>                       # drop a project (refuses on last one), auto-deregister MCP entries
 ./bld add-root <name> <root> [<root>...]          # add roots to an existing project + scan
 ./bld remove-root <name> <root> [<root>...]       # remove roots from a project + scan
@@ -104,6 +107,23 @@ releases. Codex has no project-scope concept — its
 `[mcp_servers.<name>]` sections in `~/.codex/config.toml` are global
 and Code-RAG writes them that way (the speculative-query problem
 still exists for Codex; tracked as a follow-up).
+
+**`project_dir`: umbrella directory above the roots.** A project
+entry may carry an optional `project_dir` field — an absolute
+directory that sits *above* the configured roots. When set, bld
+treats it as an additional `.mcp.json` write target (so a Claude
+Code session launched from the umbrella sees the MCP tool), and
+also writes a marker-delimited managed block into
+`<project_dir>/CLAUDE.md` containing a Grep-vs-`search_code` routing
+rule (so Claude Code prefers `search_code` for conceptual queries
+rather than defaulting to Grep). `project_dir` is **not** indexed —
+only `roots[]` get scanned. `--project-dir <dir>` sets it on
+`new-project`; for existing projects, hand-edit `rag-projects.json`
+and run `./bld stop && ./bld start`. Validation refuses `$HOME`,
+`/`, and any path equal to one of the roots. `bld remove-project`
+removes both the `.mcp.json` and the CLAUDE.md managed block at
+`project_dir`. Removing `project_dir` from the JSON without
+`remove-project` leaves the previously-written files orphaned.
 
 `./bld scan` always reconciles DB state with `rag-projects.json` before
 scanning: creates schemas for new projects, drops schemas for removed
