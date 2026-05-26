@@ -16,4 +16,11 @@ fi
 # `code-rag` with no args → show only the operational commands (not bld's
 # build/dev tasks, which are irrelevant to code-rag users).
 [[ $# -eq 0 ]] && set -- commands
+
+# `code-rag monitor` is wrapper-only — it is not a bld task. Streams a
+# live view of GPU memory + currently-loaded Ollama models; Ctrl-C exits.
+if [[ "${1:-}" == "monitor" ]]; then
+    exec watch -n 1 'echo; nvidia-smi; ollama ps'
+fi
+
 cd "$CODE_RAG_HOME" && exec ./bld "$@"

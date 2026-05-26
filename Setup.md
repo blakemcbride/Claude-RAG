@@ -375,6 +375,7 @@ the change yet — open a fresh terminal or `exec bash` again.
 ```bash
 code-rag start                               # build + start the server
 code-rag status                              # is it running? which projects?
+code-rag monitor                             # live GPU + Ollama view (Ctrl-C to exit)
 code-rag scan <project|all>                  # incremental reconcile + scan
 code-rag new-project <name> [--project-dir <dir>] <root>...
                                              # add a project, index it, register MCP entries

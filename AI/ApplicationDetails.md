@@ -49,7 +49,7 @@ are authoritative — update them rather than reinventing.
 | `src/main/backend/rag-projects.json.example` | Projects template (committed) |
 | `src/main/backend/rag-projects.json` | Live projects list (**gitignored**) |
 | `setup.sh` | First-run setup — copies `.example` → real config + generates random shared secret |
-| `code-rag` | Top-level shell wrapper — 16 lines, `cd $CODE_RAG_HOME && exec ./bld "$@"`. Lets `bld` tasks be invoked from any cwd. Requires only `CODE_RAG_HOME`; everything else is handled by `bld`. |
+| `code-rag` | Top-level shell wrapper — `cd $CODE_RAG_HOME && exec ./bld "$@"`. Lets `bld` tasks be invoked from any cwd. Requires only `CODE_RAG_HOME`; everything else is handled by `bld`. Defines one wrapper-only subcommand: `code-rag monitor` runs `watch -n 1 'echo; nvidia-smi; ollama ps'` for a live GPU + Ollama view (Ctrl-C exits). `monitor` is **not** a bld task — it exists only here. |
 
 ## Don't modify (Kiss framework code)
 
