@@ -1398,7 +1398,8 @@ public class Tasks {
             // Idempotency: clear any prior project-scope entry in this root's .mcp.json
             // before re-adding, so re-running this command never errors on "already exists".
             runSilentInDir(root, "claude", "mcp", "remove", name, "-s", "project");
-            int code = runInheritedInDir(root, "claude", "mcp", "add",
+            String[] captured = new String[1];
+            int code = runCapturedInDir(root, captured, "claude", "mcp", "add",
                     "--transport", "http", "-s", "project", name, url,
                     "--header", "X-RAG-Token: " + secret);
             if (code == 0) {
@@ -1406,6 +1407,8 @@ public class Tasks {
                 anySucceeded = true;
             } else {
                 System.err.println("warning: claude mcp add failed for '" + name + "' in " + root + ".");
+                if (captured[0] != null && !captured[0].isEmpty())
+                    System.err.println(captured[0]);
             }
         }
         if (!anySucceeded) {
@@ -1554,18 +1557,6 @@ public class Tasks {
                 content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
     }
 
-    /** Run a command with inherited stdio; returns exit code (-1 on launch failure). */
-    private static int runInherited(String... cmd) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.inheritIO();
-            return pb.start().waitFor();
-        } catch (java.io.IOException | InterruptedException e) {
-            System.err.println("Failed to run " + String.join(" ", cmd) + ": " + e.getMessage());
-            return -1;
-        }
-    }
-
     /** Run a command discarding stdio; returns exit code (-1 on launch failure). */
     private static int runSilent(String... cmd) {
         try {
@@ -1578,15 +1569,32 @@ public class Tasks {
         }
     }
 
-    /** Like {@link #runInherited} but with a specified working directory. */
-    private static int runInheritedInDir(java.io.File dir, String... cmd) {
+    /**
+     * Run a command in {@code dir}, capturing its combined stdout+stderr
+     * into {@code outCapture[0]}. The output is NOT echoed — the caller
+     * decides whether to print it (typically only on non-zero exit, so
+     * normal runs stay quiet but failures retain the underlying error).
+     */
+    private static int runCapturedInDir(java.io.File dir, String[] outCapture, String... cmd) {
         try {
             ProcessBuilder pb = new ProcessBuilder(cmd);
             pb.directory(dir);
-            pb.inheritIO();
-            return pb.start().waitFor();
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            StringBuilder sb = new StringBuilder();
+            try (java.io.BufferedReader r = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = r.readLine()) != null)
+                    sb.append(line).append('\n');
+            }
+            int code = p.waitFor();
+            if (outCapture != null && outCapture.length > 0)
+                outCapture[0] = sb.toString().trim();
+            return code;
         } catch (java.io.IOException | InterruptedException e) {
-            System.err.println("Failed to run " + String.join(" ", cmd) + " in " + dir + ": " + e.getMessage());
+            if (outCapture != null && outCapture.length > 0)
+                outCapture[0] = "Failed to run " + String.join(" ", cmd) + " in " + dir + ": " + e.getMessage();
             return -1;
         }
     }
@@ -1774,8 +1782,7 @@ public class Tasks {
             return "(global — visible to any Codex session)";
         switch (e.scope) {
             case "project":
-                return ".mcp.json in " + e.registeredUnder
-                        + "   (visible from anywhere under that tree)";
+                return e.registeredUnder;
             case "local":
                 return "registered under " + e.registeredUnder
                         + "   (only visible when 'claude' is launched from there)";
